@@ -204,7 +204,12 @@ const AdminLogin = ({
         setError(data?.error || (isSignup ? "Google registration failed" : "Google sign in failed"));
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Google account connection failed");
+      const message = err instanceof Error ? err.message : "";
+      setError(
+        message.includes("auth/unauthorized-domain")
+          ? "Google sign in is blocked for this domain. Add this site to Firebase Authentication authorized domains."
+          : message || "Google account connection failed",
+      );
     } finally {
       setGoogleLoading(false);
     }

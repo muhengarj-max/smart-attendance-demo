@@ -55,17 +55,22 @@ const SUPER_ADMIN_PASSWORD = getRequiredEnv("SUPER_ADMIN_PASSWORD");
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME?.trim();
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const FIREBASE_SERVICE_ACCOUNT_JSON = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-const hasFirebaseAdminCredentials = Boolean(FIREBASE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS);
+const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID;
+const hasFirebaseAdminConfig = Boolean(FIREBASE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS || FIREBASE_PROJECT_ID);
 
 if ((ADMIN_USERNAME && !ADMIN_PASSWORD) || (!ADMIN_USERNAME && ADMIN_PASSWORD)) {
   throw new Error("ADMIN_USERNAME and ADMIN_PASSWORD must be set together, or both omitted.");
 }
 
-if (hasFirebaseAdminCredentials && !getAdminApps().length) {
-  const credential = FIREBASE_SERVICE_ACCOUNT_JSON
-    ? cert(JSON.parse(FIREBASE_SERVICE_ACCOUNT_JSON))
-    : applicationDefault();
-  initializeAdminApp({ credential });
+if (hasFirebaseAdminConfig && !getAdminApps().length) {
+  if (FIREBASE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+    const credential = FIREBASE_SERVICE_ACCOUNT_JSON
+      ? cert(JSON.parse(FIREBASE_SERVICE_ACCOUNT_JSON))
+      : applicationDefault();
+    initializeAdminApp({ credential, projectId: FIREBASE_PROJECT_ID });
+  } else {
+    initializeAdminApp({ projectId: FIREBASE_PROJECT_ID });
+  }
 }
 
 // Initialize Database
@@ -421,7 +426,7 @@ async function startServer() {
     const { idToken, mode } = req.body;
     const authMode = mode === "register" ? "register" : "login";
 
-    if (!hasFirebaseAdminCredentials || !getAdminApps().length) {
+    if (!hasFirebaseAdminConfig || !getAdminApps().length) {
       return res.status(503).json({ error: "Google account login is not configured on the server" });
     }
 
