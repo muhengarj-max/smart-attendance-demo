@@ -18,27 +18,43 @@ const __dirname = path.dirname(__filename);
 
 const db = new Database("attendance.db");
 const NODE_ENV = process.env.NODE_ENV || "development";
-const JWT_SECRET = process.env.JWT_SECRET;
-const ADMIN_USERNAME = process.env.ADMIN_USERNAME || "Mikanu";
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
-const SUPER_ADMIN_USERNAME = process.env.SUPER_ADMIN_USERNAME || "narjabdul@gmail.com";
-const SUPER_ADMIN_PASSWORD = process.env.SUPER_ADMIN_PASSWORD || "narj@2003";
 const PORT = Number(process.env.PORT || 3001);
 const IS_PRODUCTION = NODE_ENV === "production";
 const ADMIN_COOKIE_NAME = "admin_token";
 
-if (!JWT_SECRET) {
-  if (IS_PRODUCTION) {
-    throw new Error("Missing required environment variable: JWT_SECRET");
+type AdminRow = {
+  id: number;
+  username: string;
+  role: string;
+  approved?: number;
+  is_locked?: number;
+  locked_until?: string | null;
+};
+
+declare global {
+  namespace Express {
+    interface Request {
+      admin?: AdminRow;
+    }
   }
-  console.warn("JWT_SECRET is not set. Using an insecure development fallback.");
 }
 
-if (!ADMIN_PASSWORD) {
-  if (IS_PRODUCTION) {
-    throw new Error("Missing required environment variable: ADMIN_PASSWORD");
+const getRequiredEnv = (name: string) => {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`);
   }
-  console.warn("ADMIN_PASSWORD is not set. Using insecure development bootstrap credentials.");
+  return value;
+};
+
+const JWT_SECRET = getRequiredEnv("JWT_SECRET");
+const SUPER_ADMIN_USERNAME = getRequiredEnv("SUPER_ADMIN_USERNAME");
+const SUPER_ADMIN_PASSWORD = getRequiredEnv("SUPER_ADMIN_PASSWORD");
+const ADMIN_USERNAME = process.env.ADMIN_USERNAME?.trim();
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+
+if ((ADMIN_USERNAME && !ADMIN_PASSWORD) || (!ADMIN_USERNAME && ADMIN_PASSWORD)) {
+  throw new Error("ADMIN_USERNAME and ADMIN_PASSWORD must be set together, or both omitted.");
 }
 
 // Initialize Database
@@ -100,7 +116,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_verifications_lookup ON attendance_verifications(session_id, reg_number, expires_at);
 `);
 const ensureColumn = (tableName: string, columnName: string, definition: string) => {
-  const columns: Array<{ name: string }> = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all() as Array<{ name: string }>;
   if (!columns.some((column) => column.name === columnName)) {
     db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
   }
@@ -114,16 +130,20 @@ ensureColumn("admins", "created_at", "DATETIME");
 ensureColumn("sessions", "created_by_admin_id", "INTEGER");
 ensureColumn("sessions", "deleted_at", "DATETIME");
 db.prepare("UPDATE admins SET created_at = COALESCE(created_at, CURRENT_TIMESTAMP)").run();
-db.prepare("UPDATE admins SET approved = 1 WHERE role = 'super_admin' OR username = ?").run(ADMIN_USERNAME);
-
-// Seed Admin if not exists
-const bootstrapAdminPassword = ADMIN_PASSWORD || "Mikanu@2026";
-const adminExists = db.prepare("SELECT * FROM admins WHERE username = ?").get(ADMIN_USERNAME);
-if (!adminExists) {
-  const hashedPassword = bcrypt.hashSync(bootstrapAdminPassword, 10);
-  db.prepare("INSERT INTO admins (username, password, role, approved) VALUES (?, ?, 'admin', 1)").run(ADMIN_USERNAME, hashedPassword);
+db.prepare("UPDATE admins SET approved = 1 WHERE role = 'super_admin' OR username = ?").run(SUPER_ADMIN_USERNAME);
+if (ADMIN_USERNAME) {
+  db.prepare("UPDATE admins SET approved = 1 WHERE username = ?").run(ADMIN_USERNAME);
 }
-const superAdminExists = db.prepare("SELECT * FROM admins WHERE username = ?").get(SUPER_ADMIN_USERNAME);
+
+// Seed bootstrap accounts from environment variables only.
+if (ADMIN_USERNAME && ADMIN_PASSWORD) {
+  const adminExists = db.prepare("SELECT * FROM admins WHERE username = ?").get(ADMIN_USERNAME);
+  if (!adminExists) {
+    const hashedPassword = bcrypt.hashSync(ADMIN_PASSWORD, 10);
+    db.prepare("INSERT INTO admins (username, password, role, approved) VALUES (?, ?, 'admin', 1)").run(ADMIN_USERNAME, hashedPassword);
+  }
+}
+const superAdminExists = db.prepare("SELECT * FROM admins WHERE username = ?").get(SUPER_ADMIN_USERNAME) as AdminRow | undefined;
 if (!superAdminExists) {
   const hashedPassword = bcrypt.hashSync(SUPER_ADMIN_PASSWORD, 10);
   db.prepare("INSERT INTO admins (username, password, role, approved) VALUES (?, ?, 'super_admin', 1)").run(SUPER_ADMIN_USERNAME, hashedPassword);
@@ -210,7 +230,7 @@ async function startServer() {
     }
 
     try {
-      return jwt.verify(token, JWT_SECRET || "dev-only-jwt-secret");
+      return jwt.verify(token, JWT_SECRET);
     } catch {
       return null;
     }
@@ -322,7 +342,7 @@ async function startServer() {
     }
     if (admin && bcrypt.compareSync(password, admin.password)) {
       loginAttempts.delete(clientIp);
-      const token = jwt.sign({ id: admin.id, username: admin.username, role: admin.role }, JWT_SECRET || "dev-only-jwt-secret", { expiresIn: "10m" });
+      const token = jwt.sign({ id: admin.id, username: admin.username, role: admin.role }, JWT_SECRET, { expiresIn: "10m" });
       setAuthCookie(res, token);
       res.json({
         token,
@@ -813,15 +833,15 @@ async function startServer() {
       if (!canManageSession(req.admin, session)) {
         return res.status(403).json({ error: "You do not have permission to view this session" });
       }
-      total = db.prepare("SELECT COUNT(*) as count FROM attendance WHERE session_id = ?").get(sessionId).count;
+      total = (db.prepare("SELECT COUNT(*) as count FROM attendance WHERE session_id = ?").get(sessionId) as { count: number }).count;
       records = db.prepare(`SELECT * FROM attendance WHERE session_id = ? ORDER BY submitted_at DESC LIMIT ? OFFSET ?`).all(sessionId, pageSize, offset);
     } else {
-      total = db.prepare(`
+      total = (db.prepare(`
         SELECT COUNT(*) as count
         FROM attendance a
         JOIN sessions s ON a.session_id = s.id
         WHERE s.created_by_admin_id = ?
-      `).get(req.admin.id).count;
+      `).get(req.admin.id) as { count: number }).count;
       records = db.prepare(`
         SELECT a.*, s.id as session_id
         FROM attendance a
