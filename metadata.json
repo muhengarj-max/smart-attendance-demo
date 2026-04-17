@@ -1,0 +1,8 @@
+{
+  "name": "Smart Attendance System",
+  "description": "A full-stack attendance tracking system with GPS validation, live selfie capture, and admin dashboard.",
+  "requestFramePermissions": [
+    "camera",
+    "geolocation"
+  ]
+}
