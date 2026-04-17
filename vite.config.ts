@@ -24,6 +24,9 @@ export default defineConfig(({mode}) => {
       // HMR is disabled via DISABLE_HMR env var.
       // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
+      allowedHosts: [
+        'smart-attendance-demo.onrender.com',
+      ],
       proxy: {
         '/api': {
           target: 'http://localhost:3001',
