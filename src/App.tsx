@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import "./firebase";
+import { signInWithGoogle } from "./firebase";
 import { 
   Camera, 
   MapPin, 
@@ -149,6 +149,7 @@ const AdminLogin = ({
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [loading, setLoading] = useState(false);
+  const [googleLoading, setGoogleLoading] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -173,9 +174,39 @@ const AdminLogin = ({
         setError(data.error || (isSignup ? "Signup failed" : "Login failed"));
       }
     } catch (err) {
-      setError("Network error");
+      setError("Cannot reach the server. Start the app with npm run dev or npm start.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleGoogleAccount = async () => {
+    setGoogleLoading(true);
+    setError("");
+    setSuccess("");
+    try {
+      const idToken = await signInWithGoogle();
+      const res = await fetch("/api/admin/google-auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idToken, mode: isSignup ? "register" : "login" }),
+      });
+      const data = await res.json().catch(() => null);
+
+      if (res.ok && isSignup) {
+        setSuccess(data?.message || "Google account registered. Wait for Super Admin approval.");
+        setUsername("");
+        setPassword("");
+        setIsSignup(false);
+      } else if (res.ok && data?.admin) {
+        onLogin(data.admin);
+      } else {
+        setError(data?.error || (isSignup ? "Google registration failed" : "Google sign in failed"));
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Google account connection failed");
+    } finally {
+      setGoogleLoading(false);
     }
   };
 
@@ -283,10 +314,24 @@ const AdminLogin = ({
 
           <button
             type="submit"
-            disabled={loading}
+            disabled={loading || googleLoading}
             className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 rounded-xl shadow-lg shadow-blue-600/30 transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50"
           >
             {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : isSignup ? "Create Account" : "Sign In"}
+          </button>
+
+          <button
+            type="button"
+            onClick={handleGoogleAccount}
+            disabled={loading || googleLoading}
+            className="w-full rounded-xl border border-white/20 bg-white text-slate-900 py-3 font-bold shadow-lg transition-all hover:bg-blue-50 active:scale-95 disabled:opacity-50 flex items-center justify-center gap-3"
+          >
+            {googleLoading ? (
+              <Loader2 className="w-5 h-5 animate-spin" />
+            ) : (
+              <span className="flex h-5 w-5 items-center justify-center rounded-full border border-slate-200 text-sm font-black text-blue-600">G</span>
+            )}
+            {isSignup ? "Register with Google" : "Sign in with Google"}
           </button>
 
           <button

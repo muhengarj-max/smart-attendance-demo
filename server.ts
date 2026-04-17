@@ -11,6 +11,8 @@ import ExcelJS from "exceljs";
 import PDFDocument from "pdfkit";
 import fs from "fs";
 import { createHash } from "crypto";
+import { applicationDefault, cert, getApps as getAdminApps, initializeApp as initializeAdminApp } from "firebase-admin/app";
+import { getAuth as getAdminAuth } from "firebase-admin/auth";
 // import https from "https";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -52,9 +54,18 @@ const SUPER_ADMIN_USERNAME = getRequiredEnv("SUPER_ADMIN_USERNAME");
 const SUPER_ADMIN_PASSWORD = getRequiredEnv("SUPER_ADMIN_PASSWORD");
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME?.trim();
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+const FIREBASE_SERVICE_ACCOUNT_JSON = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
+const hasFirebaseAdminCredentials = Boolean(FIREBASE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS);
 
 if ((ADMIN_USERNAME && !ADMIN_PASSWORD) || (!ADMIN_USERNAME && ADMIN_PASSWORD)) {
   throw new Error("ADMIN_USERNAME and ADMIN_PASSWORD must be set together, or both omitted.");
+}
+
+if (hasFirebaseAdminCredentials && !getAdminApps().length) {
+  const credential = FIREBASE_SERVICE_ACCOUNT_JSON
+    ? cert(JSON.parse(FIREBASE_SERVICE_ACCOUNT_JSON))
+    : applicationDefault();
+  initializeAdminApp({ credential });
 }
 
 // Initialize Database
@@ -127,8 +138,11 @@ ensureColumn("admins", "approved", "INTEGER NOT NULL DEFAULT 0");
 ensureColumn("admins", "is_locked", "INTEGER NOT NULL DEFAULT 0");
 ensureColumn("admins", "locked_until", "DATETIME");
 ensureColumn("admins", "created_at", "DATETIME");
+ensureColumn("admins", "firebase_uid", "TEXT");
+ensureColumn("admins", "auth_provider", "TEXT");
 ensureColumn("sessions", "created_by_admin_id", "INTEGER");
 ensureColumn("sessions", "deleted_at", "DATETIME");
+db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_admins_firebase_uid ON admins(firebase_uid) WHERE firebase_uid IS NOT NULL");
 db.prepare("UPDATE admins SET created_at = COALESCE(created_at, CURRENT_TIMESTAMP)").run();
 db.prepare("UPDATE admins SET approved = 1 WHERE role = 'super_admin' OR username = ?").run(SUPER_ADMIN_USERNAME);
 if (ADMIN_USERNAME) {
@@ -259,6 +273,27 @@ async function startServer() {
 
   // --- API ROUTES ---
 
+  app.get("/api/firebase-config", (_req, res) => {
+    const config = {
+      apiKey: process.env.VITE_FIREBASE_API_KEY,
+      authDomain: process.env.VITE_FIREBASE_AUTH_DOMAIN,
+      projectId: process.env.VITE_FIREBASE_PROJECT_ID,
+      storageBucket: process.env.VITE_FIREBASE_STORAGE_BUCKET,
+      messagingSenderId: process.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+      appId: process.env.VITE_FIREBASE_APP_ID,
+      measurementId: process.env.VITE_FIREBASE_MEASUREMENT_ID,
+    };
+    const missing = Object.entries(config)
+      .filter(([key, value]) => key !== "measurementId" && !value)
+      .map(([key]) => key);
+
+    if (missing.length) {
+      return res.status(503).json({ error: "Firebase is not configured", missing });
+    }
+
+    res.json(config);
+  });
+
   // Auth Middleware
   const authenticate = (req: any, res: any, next: any) => {
     const decoded = authenticateFromRequest(req);
@@ -380,6 +415,83 @@ async function startServer() {
     const hashedPassword = bcrypt.hashSync(password, 10);
     db.prepare("INSERT INTO admins (username, password, role, approved) VALUES (?, ?, 'admin', 0)").run(username.trim(), hashedPassword);
     res.json({ success: true, message: "Wait for Aproval" });
+  });
+
+  app.post("/api/admin/google-auth", async (req, res) => {
+    const { idToken, mode } = req.body;
+    const authMode = mode === "register" ? "register" : "login";
+
+    if (!hasFirebaseAdminCredentials || !getAdminApps().length) {
+      return res.status(503).json({ error: "Google account login is not configured on the server" });
+    }
+
+    if (typeof idToken !== "string" || !idToken.trim()) {
+      return res.status(400).json({ error: "Missing Google account token" });
+    }
+
+    try {
+      const decoded = await getAdminAuth().verifyIdToken(idToken);
+      const email = String(decoded.email || "").trim().toLowerCase();
+      const firebaseUid = decoded.uid;
+
+      if (!email || decoded.email_verified !== true) {
+        return res.status(403).json({ error: "Use a verified Google account email" });
+      }
+
+      let admin: any = db.prepare("SELECT * FROM admins WHERE firebase_uid = ? OR lower(username) = ?").get(firebaseUid, email);
+
+      if (authMode === "register") {
+        if (admin) {
+          if (!admin.firebase_uid) {
+            db.prepare("UPDATE admins SET firebase_uid = ?, auth_provider = 'google' WHERE id = ?").run(firebaseUid, admin.id);
+            admin = { ...admin, firebase_uid: firebaseUid, auth_provider: "google" };
+          }
+          return res.json({
+            success: true,
+            message: admin.approved === 1
+              ? "Google account connected. You can sign in."
+              : "Google account connected. Wait for Super Admin approval.",
+          });
+        }
+
+        const generatedPassword = bcrypt.hashSync(uuidv4(), 10);
+        db.prepare("INSERT INTO admins (username, password, role, approved, firebase_uid, auth_provider) VALUES (?, ?, 'admin', 0, ?, 'google')")
+          .run(email, generatedPassword, firebaseUid);
+        return res.json({ success: true, message: "Google account registered. Wait for Super Admin approval." });
+      }
+
+      if (!admin) {
+        return res.status(404).json({ error: "Google account is not registered. Create account first." });
+      }
+
+      if (!admin.firebase_uid) {
+        db.prepare("UPDATE admins SET firebase_uid = ?, auth_provider = 'google' WHERE id = ?").run(firebaseUid, admin.id);
+        admin = { ...admin, firebase_uid: firebaseUid, auth_provider: "google" };
+      }
+
+      if (admin.is_locked === 1) {
+        return res.status(423).json({ error: "Account is temporarily locked", lockedUntil: admin.locked_until });
+      }
+      if (admin.approved !== 1) {
+        return res.status(403).json({ error: "Account not yet approved. Please contact 0694 128 543" });
+      }
+
+      const token = jwt.sign({ id: admin.id, username: admin.username, role: admin.role }, JWT_SECRET, { expiresIn: "10m" });
+      setAuthCookie(res, token);
+      return res.json({
+        token,
+        admin: {
+          id: admin.id,
+          username: admin.username,
+          role: admin.role,
+          approved: admin.approved,
+          is_locked: admin.is_locked,
+          locked_until: admin.locked_until,
+        },
+      });
+    } catch (err) {
+      return res.status(401).json({ error: "Google account verification failed" });
+    }
   });
 
   app.get("/api/admin/me", authenticate, (req: any, res) => {

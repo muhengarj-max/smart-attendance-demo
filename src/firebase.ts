@@ -1,44 +1,89 @@
 import { initializeApp, getApps, type FirebaseApp, type FirebaseOptions } from "firebase/app";
 import { getAnalytics, isSupported, type Analytics } from "firebase/analytics";
+import { getAuth, GoogleAuthProvider, signInWithPopup, type Auth } from "firebase/auth";
 import { getFirestore, type Firestore } from "firebase/firestore";
 import { getStorage, type FirebaseStorage } from "firebase/storage";
 
-const env = (import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {};
-
-const firebaseConfig: FirebaseOptions = {
-  apiKey: env.VITE_FIREBASE_API_KEY,
-  authDomain: env.VITE_FIREBASE_AUTH_DOMAIN,
-  projectId: env.VITE_FIREBASE_PROJECT_ID,
-  storageBucket: env.VITE_FIREBASE_STORAGE_BUCKET,
-  messagingSenderId: env.VITE_FIREBASE_MESSAGING_SENDER_ID,
-  appId: env.VITE_FIREBASE_APP_ID,
-  measurementId: env.VITE_FIREBASE_MEASUREMENT_ID,
+type FirebaseServices = {
+  app: FirebaseApp;
+  db: Firestore;
+  storage: FirebaseStorage;
+  auth: Auth;
+  analytics: Analytics | null;
 };
 
-const requiredConfigKeys = [
-  "VITE_FIREBASE_API_KEY",
-  "VITE_FIREBASE_AUTH_DOMAIN",
-  "VITE_FIREBASE_PROJECT_ID",
-  "VITE_FIREBASE_STORAGE_BUCKET",
-  "VITE_FIREBASE_MESSAGING_SENDER_ID",
-  "VITE_FIREBASE_APP_ID",
-];
+let servicesPromise: Promise<FirebaseServices | null> | null = null;
+const isLocalDev = typeof window !== "undefined" && ["localhost", "127.0.0.1"].includes(window.location.hostname);
 
-const missingConfigKeys = requiredConfigKeys.filter((key) => !env[key]);
+const loadFirebaseConfig = async () => {
+  const response = await fetch("/api/firebase-config", { credentials: "same-origin" });
+  if (!response.ok) {
+    return null;
+  }
 
-export const firebaseApp: FirebaseApp | null = missingConfigKeys.length
-  ? null
-  : getApps()[0] ?? initializeApp(firebaseConfig);
+  return response.json() as Promise<FirebaseOptions>;
+};
 
-export const db: Firestore | null = firebaseApp ? getFirestore(firebaseApp) : null;
-export const storage: FirebaseStorage | null = firebaseApp ? getStorage(firebaseApp) : null;
+export const initializeFirebase = async () => {
+  if (!servicesPromise) {
+    servicesPromise = loadFirebaseConfig()
+      .then(async (config) => {
+        if (!config) {
+          if (isLocalDev) {
+            console.warn("Firebase is disabled. Missing runtime config.");
+          }
+          return null;
+        }
 
-export const firebaseAnalytics: Promise<Analytics | null> = firebaseApp
-  ? isSupported()
-      .then((supported) => (supported ? getAnalytics(firebaseApp) : null))
-      .catch(() => null)
-  : Promise.resolve(null);
+        const app = getApps()[0] ?? initializeApp(config);
+        const analytics = await isSupported()
+          .then((supported) => (supported ? getAnalytics(app) : null))
+          .catch(() => null);
 
-if (missingConfigKeys.length && env.DEV) {
-  console.warn(`Firebase is disabled. Missing config: ${missingConfigKeys.join(", ")}`);
-}
+        return {
+          app,
+          db: getFirestore(app),
+          storage: getStorage(app),
+          auth: getAuth(app),
+          analytics,
+        };
+      })
+      .catch((error) => {
+        if (isLocalDev) {
+          console.warn("Firebase is disabled.", error);
+        }
+        return null;
+      });
+  }
+
+  return servicesPromise;
+};
+
+export const getFirebaseApp = async () => {
+  const services = await initializeFirebase();
+  return services?.app ?? null;
+};
+
+export const getFirestoreDb = async () => {
+  const services = await initializeFirebase();
+  return services?.db ?? null;
+};
+
+export const getFirebaseStorage = async () => {
+  const services = await initializeFirebase();
+  return services?.storage ?? null;
+};
+
+export const signInWithGoogle = async () => {
+  const services = await initializeFirebase();
+  if (!services) {
+    throw new Error("Google account login is not configured");
+  }
+
+  const provider = new GoogleAuthProvider();
+  provider.setCustomParameters({ prompt: "select_account" });
+  const credential = await signInWithPopup(services.auth, provider);
+  return credential.user.getIdToken();
+};
+
+export const firebaseAnalytics = initializeFirebase().then((services) => services?.analytics ?? null);

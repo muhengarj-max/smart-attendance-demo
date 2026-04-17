@@ -1,6 +1,6 @@
 import { addDoc, collection, serverTimestamp } from "firebase/firestore";
 import { getDownloadURL, ref, uploadString } from "firebase/storage";
-import { db, storage } from "./firebase";
+import { getFirebaseStorage, getFirestoreDb } from "./firebase";
 
 type AttendanceFirebasePayload = {
   name: string;
@@ -14,6 +14,7 @@ type AttendanceFirebasePayload = {
 const safePathSegment = (value: string) => value.trim().replace(/[^a-zA-Z0-9_-]/g, "_") || "student";
 
 export const uploadImage = async (base64: string, userId: string) => {
+  const storage = await getFirebaseStorage();
   if (!storage) {
     throw new Error("Firebase Storage is not configured");
   }
@@ -25,6 +26,7 @@ export const uploadImage = async (base64: string, userId: string) => {
 };
 
 export const saveAttendance = async (data: AttendanceFirebasePayload) => {
+  const db = await getFirestoreDb();
   if (!db) {
     throw new Error("Firestore is not configured");
   }
