@@ -56,6 +56,9 @@ interface CurrentAdmin {
   subscription_expires_at?: string | null;
   subscription_payment_reference?: string | null;
   trial_session_used?: number;
+  trial_sessions_used?: number;
+  trial_sessions_remaining?: number;
+  trial_session_limit?: number;
   trial_session_id?: string | null;
   trial_started_at?: string | null;
 }
@@ -176,13 +179,13 @@ const AdminLogin = ({
         body: JSON.stringify({ idToken, mode: isSignup ? "register" : "login" }),
       });
       const data = await res.json().catch(() => null);
-      if (res.ok && isSignup) {
-        setSuccess(data?.message || "Wait for Approval");
+      if (res.ok && data?.admin) {
+        onLogin(data.admin);
+      } else if (res.ok && isSignup) {
+        setSuccess(data?.message || "Account created. You can sign in now.");
         setUsername("");
         setPassword("");
         setIsSignup(false);
-      } else if (res.ok && data?.admin) {
-        onLogin(data.admin);
       } else {
         setError(data?.error || (isSignup ? "Signup failed" : "Login failed"));
       }
@@ -215,13 +218,13 @@ const AdminLogin = ({
       });
       const data = await res.json().catch(() => null);
 
-      if (res.ok && isSignup) {
-        setSuccess(data?.message || "Google account registered. Wait for Super Admin approval.");
+      if (res.ok && data?.admin) {
+        onLogin(data.admin);
+      } else if (res.ok && isSignup) {
+        setSuccess(data?.message || "Google account registered. You can sign in now.");
         setUsername("");
         setPassword("");
         setIsSignup(false);
-      } else if (res.ok && data?.admin) {
-        onLogin(data.admin);
       } else {
         setError(data?.error || (isSignup ? "Google registration failed" : "Google sign in failed"));
       }
@@ -279,7 +282,7 @@ const AdminLogin = ({
             <LayoutDashboard className="text-white w-8 h-8" />
           </div>
           <h1 className="text-3xl font-bold text-white mb-2">Admin Portal</h1>
-          <p className="text-blue-200/60">{isSignup ? "Create account and wait for Super Admin approval" : "Secure access to Smart Attendance"}</p>
+          <p className="text-blue-200/60">{isSignup ? "Create account and sign in to Smart Attendance" : "Secure access to Smart Attendance"}</p>
         </div>
 
         <AnimatePresence>
@@ -417,7 +420,7 @@ const AdminLogin = ({
             }}
             className="w-full text-sm font-semibold text-blue-100/80 hover:text-white"
           >
-            {isSignup ? "Already approved? Sign in" : "Need an account? Register for approval"}
+            {isSignup ? "Already have an account? Sign in" : "Need an account? Register"}
           </button>
         </form>
       </motion.div>
@@ -456,12 +459,16 @@ const AdminDashboard = ({
   const [totalPages, setTotalPages] = useState(1);
   const [totalRecords, setTotalRecords] = useState(0);
   const [trialUsedOverride, setTrialUsedOverride] = useState(false);
+  const [trialSessionsUsedOverride, setTrialSessionsUsedOverride] = useState<number | null>(null);
   const hasActiveSubscription =
     currentAdmin.role === "super_admin" ||
     (currentAdmin.subscription_status === "active" &&
       Boolean(currentAdmin.subscription_expires_at) &&
       new Date(currentAdmin.subscription_expires_at as string).getTime() > Date.now());
-  const canUseFreeTrial = currentAdmin.role !== "super_admin" && currentAdmin.trial_session_used !== 1 && !trialUsedOverride;
+  const trialSessionLimit = currentAdmin.trial_session_limit || 3;
+  const trialSessionsUsed = trialSessionsUsedOverride ?? currentAdmin.trial_sessions_used ?? currentAdmin.trial_session_used ?? 0;
+  const trialSessionsRemaining = Math.max(0, trialSessionLimit - trialSessionsUsed);
+  const canUseFreeTrial = currentAdmin.role !== "super_admin" && trialSessionsRemaining > 0 && !trialUsedOverride;
   const canCreateSession = hasActiveSubscription || canUseFreeTrial;
 
   const fetchAdmins = async () => {
@@ -613,8 +620,14 @@ const AdminDashboard = ({
         setShowCreate(false);
         setCreatedSessionId(data.id);
         if (data.trialUsed) {
-          setTrialUsedOverride(true);
-          window.showPrettyMessage?.("Free trial session created. Choose a package to create more sessions.", "success");
+          setTrialSessionsUsedOverride(data.trialSessionsUsed || trialSessionsUsed + 1);
+          setTrialUsedOverride((data.trialSessionsRemaining || 0) <= 0);
+          window.showPrettyMessage?.(
+            (data.trialSessionsRemaining || 0) > 0
+              ? `Free trial session created. ${data.trialSessionsRemaining} trial sessions remaining.`
+              : "You have reached the free trial limit. Pay for a package to continue.",
+            "success",
+          );
         }
         setPage(1);
         fetchData(selectedSession?.id, 1);
@@ -734,23 +747,6 @@ const AdminDashboard = ({
     }
   };
 
-  const handleApproveAdmin = async (id: number) => {
-    try {
-      const res = await fetch(`/api/admin/users/${id}/approve`, {
-        method: "PATCH",
-        credentials: "include",
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => null);
-        alert(data?.error || "Failed to approve admin user");
-        return;
-      }
-      fetchAdmins();
-    } catch {
-      alert("Failed to approve admin user");
-    }
-  };
-
   const handleResetAdminPassword = async (id: number, username: string) => {
     const newPassword = window.prompt(`Enter a new password for ${username}`);
     if (!newPassword) return;
@@ -827,7 +823,7 @@ const AdminDashboard = ({
             <button 
               onClick={() => {
                 if (!canCreateSession) {
-                  window.showPrettyMessage?.("Your free trial session is used. Choose and pay for a package before creating a new session.", "warning");
+                  window.showPrettyMessage?.("You have reached the free trial limit. Pay for a package to continue.", "warning");
                   return;
                 }
                 setShowCreate(true);
@@ -855,13 +851,28 @@ const AdminDashboard = ({
                 {canUseFreeTrial ? "Free Trial Available" : "Payment Required"}
               </p>
               <h2 className="mt-1 text-xl font-bold text-slate-900">
-                {canUseFreeTrial ? "Create one session free, then choose a package" : "Choose a package to create sessions"}
+                {canUseFreeTrial ? "Create up to 3 sessions free, then choose a package" : "You have reached the free trial limit"}
               </h2>
               <p className="mt-1 text-sm text-slate-600">
                 {canUseFreeTrial
-                  ? "New users can create one attendance session without payment. After that, a subscription is required."
-                  : "Your free trial session has already been used. Attendance sessions are available after an active subscription."}
+                  ? `You have used ${trialSessionsUsed} of ${trialSessionLimit} trial sessions. ${trialSessionsRemaining} remaining.`
+                  : `You have used all ${trialSessionLimit} trial sessions. Pay for a package to continue creating sessions.`}
               </p>
+              <div className="mt-4 h-2 overflow-hidden rounded-full bg-amber-100">
+                <div
+                  className="h-full rounded-full bg-emerald-500 transition-all"
+                  style={{ width: `${Math.min(100, (trialSessionsUsed / trialSessionLimit) * 100)}%` }}
+                />
+              </div>
+              {canUseFreeTrial && (
+                <button
+                  type="button"
+                  onClick={() => setShowCreate(true)}
+                  className="mt-4 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-bold text-white transition-colors hover:bg-emerald-700"
+                >
+                  Start Free Trial Session ({trialSessionsRemaining} left)
+                </button>
+              )}
             </div>
             <PricingSection currentAdmin={currentAdmin} onPaymentStarted={() => fetch("/api/admin/me", { credentials: "include" }).then((res) => res.ok ? res.json() : null).then(() => undefined)} />
           </div>
@@ -1191,7 +1202,6 @@ const AdminDashboard = ({
                         <tr className="bg-slate-50 text-slate-500 text-xs uppercase tracking-wider">
                           <th className="px-6 py-4 font-semibold">Username</th>
                           <th className="px-6 py-4 font-semibold">Role</th>
-                          <th className="px-6 py-4 font-semibold">Approval</th>
                           <th className="px-6 py-4 font-semibold">Status</th>
                           <th className="px-6 py-4 font-semibold">Locked Until</th>
                           <th className="px-6 py-4 font-semibold">Created</th>
@@ -1203,7 +1213,6 @@ const AdminDashboard = ({
                           <tr key={adminUser.id} className="hover:bg-slate-50 transition-colors">
                             <td className="px-6 py-4 text-sm font-medium text-slate-900">{adminUser.username}</td>
                             <td className="px-6 py-4 text-sm text-slate-600">{adminUser.role === "super_admin" ? "Super Admin" : "Admin"}</td>
-                            <td className="px-6 py-4 text-sm text-slate-600">{adminUser.approved ? "Approved" : "Pending"}</td>
                             <td className="px-6 py-4 text-sm text-slate-600">{adminUser.is_locked ? "Locked" : "Active"}</td>
                             <td className="px-6 py-4 text-sm text-slate-500">{adminUser.is_locked ? "Manual unlock required" : "-"}</td>
                             <td className="px-6 py-4 text-sm text-slate-500">{new Date(adminUser.created_at).toLocaleString()}</td>
@@ -1211,14 +1220,6 @@ const AdminDashboard = ({
                               <div className="flex gap-2">
                                 {adminUser.role !== "super_admin" && (
                                   <>
-                                    {!adminUser.approved && (
-                                      <button
-                                        onClick={() => handleApproveAdmin(adminUser.id)}
-                                        className="rounded bg-emerald-100 px-3 py-1 text-xs font-bold text-emerald-700"
-                                      >
-                                        Approve
-                                      </button>
-                                    )}
                                     <button
                                       onClick={() => handleResetAdminPassword(adminUser.id, adminUser.username)}
                                       className="rounded bg-blue-100 px-3 py-1 text-xs font-bold text-blue-700"

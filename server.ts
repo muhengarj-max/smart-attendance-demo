@@ -47,6 +47,7 @@ type AdminRow = {
   subscription_expires_at?: string | null;
   subscription_payment_reference?: string | null;
   trial_session_used?: number;
+  trial_sessions_used?: number;
   trial_session_id?: string | null;
   trial_started_at?: string | null;
 };
@@ -176,12 +177,14 @@ ensureColumn("admins", "subscription_started_at", "DATETIME");
 ensureColumn("admins", "subscription_expires_at", "DATETIME");
 ensureColumn("admins", "subscription_payment_reference", "TEXT");
 ensureColumn("admins", "trial_session_used", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("admins", "trial_sessions_used", "INTEGER NOT NULL DEFAULT 0");
 ensureColumn("admins", "trial_session_id", "TEXT");
 ensureColumn("admins", "trial_started_at", "DATETIME");
 ensureColumn("sessions", "created_by_admin_id", "INTEGER");
 ensureColumn("sessions", "deleted_at", "DATETIME");
 db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_admins_firebase_uid ON admins(firebase_uid) WHERE firebase_uid IS NOT NULL");
 db.prepare("UPDATE admins SET created_at = COALESCE(created_at, CURRENT_TIMESTAMP)").run();
+db.prepare("UPDATE admins SET approved = 1 WHERE approved != 1").run();
 db.prepare("UPDATE admins SET approved = 1 WHERE role = 'super_admin' OR username = ?").run(SUPER_ADMIN_USERNAME);
 if (ADMIN_USERNAME) {
   db.prepare("UPDATE admins SET approved = 1 WHERE username = ?").run(ADMIN_USERNAME);
@@ -362,6 +365,7 @@ const SUBSCRIPTION_PLANS = {
   quarterly: { amount: 70000, months: 3, label: "Quarterly Plan" },
   annual: { amount: 180000, months: 12, label: "Annual Plan" },
 } as const;
+const FREE_TRIAL_SESSION_LIMIT = 3;
 
 type SubscriptionPlanId = keyof typeof SUBSCRIPTION_PLANS;
 
@@ -385,10 +389,35 @@ const hasActiveSubscription = (admin: Pick<AdminRow, "role" | "subscription_stat
   return new Date(admin.subscription_expires_at).getTime() > Date.now();
 };
 
-const canUseFreeTrialSession = (admin: Pick<AdminRow, "role" | "trial_session_used">) => {
-  if (admin.role === "super_admin") return false;
-  return Number(admin.trial_session_used || 0) !== 1;
+const getTrialSessionsUsed = (admin: Pick<AdminRow, "trial_sessions_used" | "trial_session_used">) => {
+  const count = Number(admin.trial_sessions_used || 0);
+  if (count > 0) return count;
+  return Number(admin.trial_session_used || 0);
 };
+
+const canUseFreeTrialSession = (admin: Pick<AdminRow, "role" | "trial_sessions_used" | "trial_session_used">) => {
+  if (admin.role === "super_admin") return false;
+  return getTrialSessionsUsed(admin) < FREE_TRIAL_SESSION_LIMIT;
+};
+
+const toPublicAdmin = (admin: any) => ({
+  id: admin.id,
+  username: admin.username,
+  role: admin.role,
+  approved: admin.approved,
+  is_locked: admin.is_locked,
+  locked_until: admin.locked_until,
+  subscription_plan: admin.subscription_plan || null,
+  subscription_status: admin.subscription_status || "inactive",
+  subscription_expires_at: admin.subscription_expires_at || null,
+  subscription_payment_reference: admin.subscription_payment_reference || null,
+  trial_session_used: getTrialSessionsUsed(admin),
+  trial_sessions_used: getTrialSessionsUsed(admin),
+  trial_sessions_remaining: Math.max(0, FREE_TRIAL_SESSION_LIMIT - getTrialSessionsUsed(admin)),
+  trial_session_limit: FREE_TRIAL_SESSION_LIMIT,
+  trial_session_id: admin.trial_session_id || null,
+  trial_started_at: admin.trial_started_at || null,
+});
 
 const expireAdminSubscriptionIfNeeded = (admin: AdminRow) => {
   if (admin.role === "super_admin") return admin;
@@ -447,8 +476,8 @@ const restoreFirestoreData = async () => {
   ]);
 
   const upsertAdmin = db.prepare(`
-    INSERT INTO admins (id, username, password, role, approved, is_locked, locked_until, created_at, firebase_uid, auth_provider, subscription_plan, subscription_status, subscription_started_at, subscription_expires_at, subscription_payment_reference, trial_session_used, trial_session_id, trial_started_at)
-    VALUES (@id, @username, @password, @role, @approved, @is_locked, @locked_until, @created_at, @firebase_uid, @auth_provider, @subscription_plan, @subscription_status, @subscription_started_at, @subscription_expires_at, @subscription_payment_reference, @trial_session_used, @trial_session_id, @trial_started_at)
+    INSERT INTO admins (id, username, password, role, approved, is_locked, locked_until, created_at, firebase_uid, auth_provider, subscription_plan, subscription_status, subscription_started_at, subscription_expires_at, subscription_payment_reference, trial_session_used, trial_sessions_used, trial_session_id, trial_started_at)
+    VALUES (@id, @username, @password, @role, @approved, @is_locked, @locked_until, @created_at, @firebase_uid, @auth_provider, @subscription_plan, @subscription_status, @subscription_started_at, @subscription_expires_at, @subscription_payment_reference, @trial_session_used, @trial_sessions_used, @trial_session_id, @trial_started_at)
     ON CONFLICT(id) DO UPDATE SET
       username = excluded.username,
       password = excluded.password,
@@ -465,6 +494,7 @@ const restoreFirestoreData = async () => {
       subscription_expires_at = excluded.subscription_expires_at,
       subscription_payment_reference = excluded.subscription_payment_reference,
       trial_session_used = excluded.trial_session_used,
+      trial_sessions_used = excluded.trial_sessions_used,
       trial_session_id = excluded.trial_session_id,
       trial_started_at = excluded.trial_started_at
   `);
@@ -504,7 +534,7 @@ const restoreFirestoreData = async () => {
         username: data.username,
         password: data.password || "",
         role: data.role || "admin",
-        approved: Number(data.approved || 0),
+        approved: 1,
         is_locked: Number(data.is_locked || 0),
         locked_until: data.locked_until || null,
         created_at: data.created_at || null,
@@ -516,6 +546,7 @@ const restoreFirestoreData = async () => {
         subscription_expires_at: data.subscription_expires_at || null,
         subscription_payment_reference: data.subscription_payment_reference || null,
         trial_session_used: Number(data.trial_session_used || 0),
+        trial_sessions_used: Number(data.trial_sessions_used || data.trial_session_used || 0),
         trial_session_id: data.trial_session_id || null,
         trial_started_at: data.trial_started_at || null,
       });
@@ -579,7 +610,7 @@ const createLocalAdminFromGoogleFirestore = (googleAdmin: Record<string, any>) =
       email,
       generatedPassword,
       googleAdmin.role || "admin",
-      Number(googleAdmin.approved || 0),
+      1,
       Number(googleAdmin.is_locked || 0),
       firebaseUid,
     );
@@ -621,6 +652,11 @@ const fetchRemoteImageBuffer = async (imageUrl?: string | null) => {
 
 async function startServer() {
   await restoreFirestoreData();
+  db.prepare("UPDATE admins SET approved = 1 WHERE approved != 1").run();
+  if (firestoreDb) {
+    const approvedAdmins: any[] = db.prepare("SELECT * FROM admins").all();
+    await Promise.all(approvedAdmins.map((row) => mirrorToFirestore("admins", row.id, row)));
+  }
 
 const app = express();
   // const options = {
@@ -761,7 +797,7 @@ const app = express();
       res.status(401).json({ error: "Invalid token" });
       return;
     }
-    let admin: any = db.prepare("SELECT id, username, role, approved, is_locked, locked_until, subscription_plan, subscription_status, subscription_expires_at, subscription_payment_reference, trial_session_used, trial_session_id, trial_started_at FROM admins WHERE id = ?").get((decoded as any).id);
+    let admin: any = db.prepare("SELECT id, username, role, approved, is_locked, locked_until, subscription_plan, subscription_status, subscription_expires_at, subscription_payment_reference, trial_session_used, trial_sessions_used, trial_session_id, trial_started_at FROM admins WHERE id = ?").get((decoded as any).id);
     if (!admin) {
       res.status(401).json({ error: "Admin account not found" });
       return;
@@ -770,11 +806,6 @@ const app = express();
     if (admin.is_locked === 1) {
       clearAuthCookie(res);
       res.status(423).json({ error: "Account is temporarily locked", lockedUntil: admin.locked_until });
-      return;
-    }
-    if (admin.approved !== 1) {
-      clearAuthCookie(res);
-      res.status(403).json({ error: "Account not yet approved. Please contact 0694 128 543" });
       return;
     }
     admin = expireAdminSubscriptionIfNeeded(admin);
@@ -835,23 +866,13 @@ const app = express();
     if (admin?.is_locked === 1) {
       return res.status(423).json({ error: "Account is temporarily locked", lockedUntil: admin.locked_until });
     }
-    if (admin && admin.approved !== 1) {
-      return res.status(403).json({ error: "Account not yet approved. Please contact 0694 128 543" });
-    }
     if (admin && bcrypt.compareSync(password, admin.password)) {
       loginAttempts.delete(clientIp);
       const token = jwt.sign({ id: admin.id, username: admin.username, role: admin.role }, JWT_SECRET, { expiresIn: AUTH_TOKEN_EXPIRES_IN });
       setAuthCookie(res, token);
       res.json({
         token,
-        admin: {
-          id: admin.id,
-          username: admin.username,
-          role: admin.role,
-          approved: admin.approved,
-          is_locked: admin.is_locked,
-          locked_until: admin.locked_until,
-        },
+        admin: toPublicAdmin(admin),
       });
     } else {
       if (!currentAttempt || nowMs - currentAttempt.firstAttemptAt >= attemptWindowMs) {
@@ -876,9 +897,12 @@ const app = express();
     }
 
     const hashedPassword = bcrypt.hashSync(password, 10);
-    const result = db.prepare("INSERT INTO admins (username, password, role, approved) VALUES (?, ?, 'admin', 0)").run(username.trim(), hashedPassword);
+    const result = db.prepare("INSERT INTO admins (username, password, role, approved) VALUES (?, ?, 'admin', 1)").run(username.trim(), hashedPassword);
     syncAdminToFirestore(result.lastInsertRowid);
-    res.json({ success: true, message: "Wait for Aproval" });
+    const admin: any = db.prepare("SELECT * FROM admins WHERE id = ?").get(result.lastInsertRowid);
+    const token = jwt.sign({ id: admin.id, username: admin.username, role: admin.role }, JWT_SECRET, { expiresIn: AUTH_TOKEN_EXPIRES_IN });
+    setAuthCookie(res, token);
+    res.json({ token, admin: toPublicAdmin(admin), message: "Account created." });
   });
 
   app.post("/api/admin/firebase-auth", async (req, res) => {
@@ -918,41 +942,43 @@ const app = express();
           if (!admin.firebase_uid) {
             db.prepare("UPDATE admins SET firebase_uid = ?, auth_provider = 'firebase' WHERE id = ?").run(firebaseUid, admin.id);
             admin = { ...admin, firebase_uid: firebaseUid, auth_provider: "firebase" };
-            syncAdminToFirestore(admin.id);
           }
+          db.prepare("UPDATE admins SET approved = 1 WHERE id = ?").run(admin.id);
+          admin = { ...admin, approved: 1 };
+          syncAdminToFirestore(admin.id);
           await saveGoogleAdminToFirestoreRest(firebaseUid, idToken, {
             id: admin.id,
             username: email,
             email,
             role: admin.role || "admin",
-            approved: Number(admin.approved || 0),
+            approved: 1,
             is_locked: Number(admin.is_locked || 0),
             firebase_uid: firebaseUid,
             auth_provider: admin.auth_provider || "firebase",
           }).catch((err) => console.error("Failed to save Firebase admin fallback:", err));
-          return res.json({
-            success: true,
-            message: admin.approved === 1
-              ? "Account connected. You can sign in."
-              : "Account created. Wait for Super Admin approval.",
-          });
+          const token = jwt.sign({ id: admin.id, username: admin.username, role: admin.role }, JWT_SECRET, { expiresIn: AUTH_TOKEN_EXPIRES_IN });
+          setAuthCookie(res, token);
+          return res.json({ token, admin: toPublicAdmin(admin), message: "Account connected." });
         }
 
         const generatedPassword = bcrypt.hashSync(uuidv4(), 10);
-        const result = db.prepare("INSERT INTO admins (username, password, role, approved, firebase_uid, auth_provider) VALUES (?, ?, 'admin', 0, ?, 'firebase')")
+        const result = db.prepare("INSERT INTO admins (username, password, role, approved, firebase_uid, auth_provider) VALUES (?, ?, 'admin', 1, ?, 'firebase')")
           .run(email, generatedPassword, firebaseUid);
         syncAdminToFirestore(result.lastInsertRowid);
+        const createdAdmin: any = db.prepare("SELECT * FROM admins WHERE id = ?").get(result.lastInsertRowid);
         await saveGoogleAdminToFirestoreRest(firebaseUid, idToken, {
           id: Number(result.lastInsertRowid),
           username: email,
           email,
           role: "admin",
-          approved: 0,
+          approved: 1,
           is_locked: 0,
           firebase_uid: firebaseUid,
           auth_provider: "firebase",
         });
-        return res.json({ success: true, message: "Account created. Wait for Super Admin approval." });
+        const token = jwt.sign({ id: createdAdmin.id, username: createdAdmin.username, role: createdAdmin.role }, JWT_SECRET, { expiresIn: AUTH_TOKEN_EXPIRES_IN });
+        setAuthCookie(res, token);
+        return res.json({ token, admin: toPublicAdmin(createdAdmin), message: "Account created." });
       }
 
       if (!admin) {
@@ -968,22 +994,11 @@ const app = express();
       if (admin.is_locked === 1) {
         return res.status(423).json({ error: "Account is temporarily locked", lockedUntil: admin.locked_until });
       }
-      if (admin.approved !== 1) {
-        return res.status(403).json({ error: "Account not yet approved. Please contact 0694 128 543" });
-      }
-
       const token = jwt.sign({ id: admin.id, username: admin.username, role: admin.role }, JWT_SECRET, { expiresIn: AUTH_TOKEN_EXPIRES_IN });
       setAuthCookie(res, token);
       return res.json({
         token,
-        admin: {
-          id: admin.id,
-          username: admin.username,
-          role: admin.role,
-          approved: admin.approved,
-          is_locked: admin.is_locked,
-          locked_until: admin.locked_until,
-        },
+        admin: toPublicAdmin(admin),
       });
     } catch (err) {
       return res.status(401).json({ error: "Firebase account verification failed" });
@@ -1027,41 +1042,43 @@ const app = express();
           if (!admin.firebase_uid) {
             db.prepare("UPDATE admins SET firebase_uid = ?, auth_provider = 'google' WHERE id = ?").run(firebaseUid, admin.id);
             admin = { ...admin, firebase_uid: firebaseUid, auth_provider: "google" };
-            syncAdminToFirestore(admin.id);
           }
+          db.prepare("UPDATE admins SET approved = 1 WHERE id = ?").run(admin.id);
+          admin = { ...admin, approved: 1 };
+          syncAdminToFirestore(admin.id);
           await saveGoogleAdminToFirestoreRest(firebaseUid, idToken, {
             id: admin.id,
             username: email,
             email,
             role: admin.role || "admin",
-            approved: Number(admin.approved || 0),
+            approved: 1,
             is_locked: Number(admin.is_locked || 0),
             firebase_uid: firebaseUid,
             auth_provider: "google",
           }).catch((err) => console.error("Failed to save Google admin fallback:", err));
-          return res.json({
-            success: true,
-            message: admin.approved === 1
-              ? "Google account connected. You can sign in."
-              : "Google account connected. Wait for Super Admin approval.",
-          });
+          const token = jwt.sign({ id: admin.id, username: admin.username, role: admin.role }, JWT_SECRET, { expiresIn: AUTH_TOKEN_EXPIRES_IN });
+          setAuthCookie(res, token);
+          return res.json({ token, admin: toPublicAdmin(admin), message: "Google account connected." });
         }
 
         const generatedPassword = bcrypt.hashSync(uuidv4(), 10);
-        const result = db.prepare("INSERT INTO admins (username, password, role, approved, firebase_uid, auth_provider) VALUES (?, ?, 'admin', 0, ?, 'google')")
+        const result = db.prepare("INSERT INTO admins (username, password, role, approved, firebase_uid, auth_provider) VALUES (?, ?, 'admin', 1, ?, 'google')")
           .run(email, generatedPassword, firebaseUid);
         syncAdminToFirestore(result.lastInsertRowid);
+        const createdAdmin: any = db.prepare("SELECT * FROM admins WHERE id = ?").get(result.lastInsertRowid);
         await saveGoogleAdminToFirestoreRest(firebaseUid, idToken, {
           id: Number(result.lastInsertRowid),
           username: email,
           email,
           role: "admin",
-          approved: 0,
+          approved: 1,
           is_locked: 0,
           firebase_uid: firebaseUid,
           auth_provider: "google",
         });
-        return res.json({ success: true, message: "Google account registered. Wait for Super Admin approval." });
+        const token = jwt.sign({ id: createdAdmin.id, username: createdAdmin.username, role: createdAdmin.role }, JWT_SECRET, { expiresIn: AUTH_TOKEN_EXPIRES_IN });
+        setAuthCookie(res, token);
+        return res.json({ token, admin: toPublicAdmin(createdAdmin), message: "Google account registered." });
       }
 
       if (!admin) {
@@ -1077,22 +1094,11 @@ const app = express();
       if (admin.is_locked === 1) {
         return res.status(423).json({ error: "Account is temporarily locked", lockedUntil: admin.locked_until });
       }
-      if (admin.approved !== 1) {
-        return res.status(403).json({ error: "Account not yet approved. Please contact 0694 128 543" });
-      }
-
       const token = jwt.sign({ id: admin.id, username: admin.username, role: admin.role }, JWT_SECRET, { expiresIn: AUTH_TOKEN_EXPIRES_IN });
       setAuthCookie(res, token);
       return res.json({
         token,
-        admin: {
-          id: admin.id,
-          username: admin.username,
-          role: admin.role,
-          approved: admin.approved,
-          is_locked: admin.is_locked,
-          locked_until: admin.locked_until,
-        },
+        admin: toPublicAdmin(admin),
       });
     } catch (err) {
       return res.status(401).json({ error: "Google account verification failed" });
@@ -1100,21 +1106,7 @@ const app = express();
   });
 
   app.get("/api/admin/me", authenticate, (req: any, res) => {
-    res.json({
-      id: req.admin.id,
-      username: req.admin.username,
-      role: req.admin.role,
-      approved: req.admin.approved,
-      is_locked: req.admin.is_locked,
-      locked_until: req.admin.locked_until,
-      subscription_plan: req.admin.subscription_plan,
-      subscription_status: req.admin.subscription_status,
-      subscription_expires_at: req.admin.subscription_expires_at,
-      subscription_payment_reference: req.admin.subscription_payment_reference,
-      trial_session_used: req.admin.trial_session_used,
-      trial_session_id: req.admin.trial_session_id,
-      trial_started_at: req.admin.trial_started_at,
-    });
+    res.json(toPublicAdmin(req.admin));
   });
 
   app.post("/api/admin/logout", (_req, res) => {
@@ -1123,7 +1115,7 @@ const app = express();
   });
 
   app.get("/api/admin/users", authenticate, requireSuperAdmin, (_req, res) => {
-    const admins = db.prepare("SELECT id, username, role, approved, is_locked, locked_until, created_at FROM admins ORDER BY approved ASC, role DESC, created_at ASC").all();
+    const admins = db.prepare("SELECT id, username, role, approved, is_locked, locked_until, created_at FROM admins ORDER BY role DESC, created_at ASC").all();
     res.json(admins);
   });
 
@@ -1142,20 +1134,6 @@ const app = express();
     const hashedPassword = bcrypt.hashSync(password, 10);
     const result = db.prepare("INSERT INTO admins (username, password, role, approved) VALUES (?, ?, ?, 1)").run(username.trim(), hashedPassword, role);
     syncAdminToFirestore(result.lastInsertRowid);
-    res.json({ success: true });
-  });
-
-  app.patch("/api/admin/users/:id/approve", authenticate, requireSuperAdmin, (req: any, res) => {
-    const { id } = req.params;
-    const target: any = db.prepare("SELECT id, role FROM admins WHERE id = ?").get(id);
-    if (!target) {
-      return res.status(404).json({ error: "Admin user not found" });
-    }
-    if (target.role === "super_admin") {
-      return res.status(403).json({ error: "Super admin accounts are already approved" });
-    }
-    db.prepare("UPDATE admins SET approved = 1 WHERE id = ?").run(id);
-    syncAdminToFirestore(id);
     res.json({ success: true });
   });
 
@@ -1267,8 +1245,11 @@ const app = express();
     const hasTrialAccess = canUseFreeTrialSession(req.admin);
     if (!hasPaidAccess && !hasTrialAccess) {
       return res.status(402).json({
-        error: "Your free trial session has already been used. Please choose and pay for a subscription package before creating a new session.",
+        error: "You have reached the free trial limit. Please pay for a subscription package to continue creating sessions.",
         paymentRequired: true,
+        trialLimitReached: true,
+        trialSessionsUsed: FREE_TRIAL_SESSION_LIMIT,
+        trialSessionLimit: FREE_TRIAL_SESSION_LIMIT,
       });
     }
 
@@ -1298,11 +1279,18 @@ const app = express();
       .run(id, name.trim(), req.admin.id, lat, lng, radius / 1000, expiresAt); // radius in km
     syncSessionToFirestore(id);
     if (!hasPaidAccess && hasTrialAccess) {
-      db.prepare("UPDATE admins SET trial_session_used = 1, trial_session_id = ?, trial_started_at = ? WHERE id = ?")
-        .run(id, new Date().toISOString(), req.admin.id);
+      const nextTrialCount = Math.min(FREE_TRIAL_SESSION_LIMIT, getTrialSessionsUsed(req.admin) + 1);
+      db.prepare("UPDATE admins SET trial_session_used = ?, trial_sessions_used = ?, trial_session_id = ?, trial_started_at = COALESCE(trial_started_at, ?) WHERE id = ?")
+        .run(nextTrialCount, nextTrialCount, id, new Date().toISOString(), req.admin.id);
       syncAdminToFirestore(req.admin.id);
     }
-    res.json({ id, trialUsed: !hasPaidAccess && hasTrialAccess });
+    res.json({
+      id,
+      trialUsed: !hasPaidAccess && hasTrialAccess,
+      trialSessionsUsed: !hasPaidAccess && hasTrialAccess ? Math.min(FREE_TRIAL_SESSION_LIMIT, getTrialSessionsUsed(req.admin) + 1) : getTrialSessionsUsed(req.admin),
+      trialSessionsRemaining: !hasPaidAccess && hasTrialAccess ? Math.max(0, FREE_TRIAL_SESSION_LIMIT - getTrialSessionsUsed(req.admin) - 1) : Math.max(0, FREE_TRIAL_SESSION_LIMIT - getTrialSessionsUsed(req.admin)),
+      trialSessionLimit: FREE_TRIAL_SESSION_LIMIT,
+    });
   });
 
   // Delete Session
