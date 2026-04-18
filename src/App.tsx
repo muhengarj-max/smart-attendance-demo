@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { registerWithEmailPassword, signInWithEmailPassword, signInWithGoogle } from "./firebase";
+import { registerWithEmailPassword, signInWithApple, signInWithEmailPassword, signInWithGoogle } from "./firebase";
 import { 
   Camera, 
   MapPin, 
@@ -150,6 +150,7 @@ const AdminLogin = ({
   const [success, setSuccess] = useState("");
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
+  const [appleLoading, setAppleLoading] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -223,6 +224,41 @@ const AdminLogin = ({
       );
     } finally {
       setGoogleLoading(false);
+    }
+  };
+
+  const handleAppleAccount = async () => {
+    setAppleLoading(true);
+    setError("");
+    setSuccess("");
+    try {
+      const idToken = await signInWithApple();
+      const res = await fetch("/api/admin/firebase-auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idToken, mode: isSignup ? "register" : "login" }),
+      });
+      const data = await res.json().catch(() => null);
+
+      if (res.ok && isSignup) {
+        setSuccess(data?.message || "Apple account registered. Wait for Super Admin approval.");
+        setUsername("");
+        setPassword("");
+        setIsSignup(false);
+      } else if (res.ok && data?.admin) {
+        onLogin(data.admin);
+      } else {
+        setError(data?.error || (isSignup ? "Apple registration failed" : "Apple sign in failed"));
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "";
+      setError(
+        message.includes("auth/unauthorized-domain")
+          ? "Apple sign in is blocked for this domain. Add this site to Firebase Authentication authorized domains."
+          : message || "Apple account connection failed",
+      );
+    } finally {
+      setAppleLoading(false);
     }
   };
 
@@ -330,7 +366,7 @@ const AdminLogin = ({
 
           <button
             type="submit"
-            disabled={loading || googleLoading}
+            disabled={loading || googleLoading || appleLoading}
             className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 rounded-xl shadow-lg shadow-blue-600/30 transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50"
           >
             {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : isSignup ? "Create Account" : "Sign In"}
@@ -339,7 +375,7 @@ const AdminLogin = ({
           <button
             type="button"
             onClick={handleGoogleAccount}
-            disabled={loading || googleLoading}
+            disabled={loading || googleLoading || appleLoading}
             className="w-full rounded-xl border border-white/20 bg-white text-slate-900 py-3 font-bold shadow-lg transition-all hover:bg-blue-50 active:scale-95 disabled:opacity-50 flex items-center justify-center gap-3"
           >
             {googleLoading ? (
@@ -348,6 +384,20 @@ const AdminLogin = ({
               <span className="flex h-5 w-5 items-center justify-center rounded-full border border-slate-200 text-sm font-black text-blue-600">G</span>
             )}
             {isSignup ? "Register with Google" : "Sign in with Google"}
+          </button>
+
+          <button
+            type="button"
+            onClick={handleAppleAccount}
+            disabled={loading || googleLoading || appleLoading}
+            className="w-full rounded-xl border border-white/20 bg-slate-950 text-white py-3 font-bold shadow-lg transition-all hover:bg-black active:scale-95 disabled:opacity-50 flex items-center justify-center gap-3"
+          >
+            {appleLoading ? (
+              <Loader2 className="w-5 h-5 animate-spin" />
+            ) : (
+              <span className="flex h-5 w-5 items-center justify-center rounded-full border border-white/30 text-sm font-black">A</span>
+            )}
+            {isSignup ? "Register with Apple" : "Sign in with Apple"}
           </button>
 
           <button
@@ -1889,22 +1939,6 @@ export default function App() {
         window.history.pushState({}, "", "/");
       });
   };
-
-  useEffect(() => {
-    if (!currentAdmin || path.startsWith("/attendance/")) return;
-
-    const timer = window.setTimeout(() => {
-      fetch("/api/admin/logout", { method: "POST", credentials: "include" })
-        .finally(() => {
-          setCurrentAdmin(null);
-          setWelcomeName(null);
-          setSessionMessage("Your secure admin session expired after 10 minutes of access. Please log in again to protect attendance data.");
-          window.history.pushState({}, "", "/");
-        });
-    }, 10 * 60 * 1000);
-
-    return () => window.clearTimeout(timer);
-  }, [currentAdmin?.id, path]);
 
   // Simple Routing
   if (path.startsWith("/attendance/")) {

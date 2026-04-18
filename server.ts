@@ -13,6 +13,7 @@ import { createHash } from "crypto";
 import { applicationDefault, cert, getApps as getAdminApps, initializeApp as initializeAdminApp } from "firebase-admin/app";
 import { getAuth as getAdminAuth } from "firebase-admin/auth";
 import { getFirestore as getAdminFirestore, type Firestore } from "firebase-admin/firestore";
+import { getStorage as getAdminStorage, type Storage } from "firebase-admin/storage";
 // import https from "https";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -30,6 +31,8 @@ const IS_PRODUCTION = NODE_ENV === "production";
 const IS_RENDER = process.env.RENDER === "true" || Boolean(process.env.RENDER_SERVICE_ID);
 const USE_VITE_DEV_SERVER = NODE_ENV !== "production" && !IS_RENDER;
 const ADMIN_COOKIE_NAME = "admin_token";
+const AUTH_SESSION_SECONDS = 30 * 24 * 60 * 60;
+const AUTH_TOKEN_EXPIRES_IN = "30d";
 const ATTENDANCE_DIR = process.env.ATTENDANCE_DIR || path.join(process.cwd(), "attendance");
 
 type AdminRow = {
@@ -57,6 +60,8 @@ const getRequiredEnv = (name: string) => {
   return value;
 };
 
+const isRemoteUrl = (value?: string | null) => /^https?:\/\//i.test(String(value || ""));
+
 const JWT_SECRET = getRequiredEnv("JWT_SECRET");
 const SUPER_ADMIN_USERNAME = getRequiredEnv("SUPER_ADMIN_USERNAME");
 const SUPER_ADMIN_PASSWORD = getRequiredEnv("SUPER_ADMIN_PASSWORD");
@@ -65,6 +70,7 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const FIREBASE_SERVICE_ACCOUNT_JSON = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
 const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID;
 const FIREBASE_WEB_API_KEY = process.env.VITE_FIREBASE_API_KEY;
+const FIREBASE_STORAGE_BUCKET = process.env.FIREBASE_STORAGE_BUCKET || process.env.VITE_FIREBASE_STORAGE_BUCKET;
 const hasFirebaseAdminConfig = Boolean(FIREBASE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS || FIREBASE_PROJECT_ID);
 const hasFirestoreCredentials = Boolean(FIREBASE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS);
 
@@ -77,12 +83,13 @@ if (hasFirebaseAdminConfig && !getAdminApps().length) {
     const credential = FIREBASE_SERVICE_ACCOUNT_JSON
       ? cert(JSON.parse(FIREBASE_SERVICE_ACCOUNT_JSON))
       : applicationDefault();
-    initializeAdminApp({ credential, projectId: FIREBASE_PROJECT_ID });
+    initializeAdminApp({ credential, projectId: FIREBASE_PROJECT_ID, storageBucket: FIREBASE_STORAGE_BUCKET });
   } else {
-    initializeAdminApp({ projectId: FIREBASE_PROJECT_ID });
+    initializeAdminApp({ projectId: FIREBASE_PROJECT_ID, storageBucket: FIREBASE_STORAGE_BUCKET });
   }
 }
 const firestoreDb: Firestore | null = hasFirestoreCredentials && getAdminApps().length ? getAdminFirestore() : null;
+const firebaseStorage: Storage | null = hasFirestoreCredentials && FIREBASE_STORAGE_BUCKET && getAdminApps().length ? getAdminStorage() : null;
 
 // Initialize Database
 db.exec(`
@@ -434,6 +441,39 @@ const createLocalAdminFromGoogleFirestore = (googleAdmin: Record<string, any>) =
   return db.prepare("SELECT * FROM admins WHERE id = ?").get(result.lastInsertRowid);
 };
 
+const uploadSelfieToFirebaseStorage = async (objectPath: string, buffer: Buffer) => {
+  if (!firebaseStorage) return null;
+
+  const bucket = firebaseStorage.bucket(FIREBASE_STORAGE_BUCKET);
+  const file = bucket.file(objectPath);
+  await file.save(buffer, {
+    contentType: "image/jpeg",
+    resumable: false,
+    metadata: {
+      cacheControl: "public, max-age=31536000",
+    },
+  });
+  await file.makePublic();
+  return `https://storage.googleapis.com/${bucket.name}/${encodeURI(objectPath)}`;
+};
+
+const deleteSelfieFromFirebaseStorage = async (imageUrl?: string | null) => {
+  if (!firebaseStorage || !imageUrl || !FIREBASE_STORAGE_BUCKET) return;
+  const marker = `/${FIREBASE_STORAGE_BUCKET}/`;
+  const markerIndex = imageUrl.indexOf(marker);
+  if (markerIndex === -1) return;
+
+  const objectPath = decodeURIComponent(imageUrl.slice(markerIndex + marker.length));
+  await firebaseStorage.bucket(FIREBASE_STORAGE_BUCKET).file(objectPath).delete({ ignoreNotFound: true });
+};
+
+const fetchRemoteImageBuffer = async (imageUrl?: string | null) => {
+  if (!isRemoteUrl(imageUrl)) return null;
+  const response = await fetch(String(imageUrl));
+  if (!response.ok) return null;
+  return Buffer.from(await response.arrayBuffer());
+};
+
 async function startServer() {
   await restoreFirestoreData();
 
@@ -477,7 +517,7 @@ async function startServer() {
       "HttpOnly",
       "Path=/",
       "SameSite=Lax",
-      `Max-Age=${10 * 60}`,
+      `Max-Age=${AUTH_SESSION_SECONDS}`,
     ];
 
     if (IS_PRODUCTION) {
@@ -647,7 +687,7 @@ async function startServer() {
     }
     if (admin && bcrypt.compareSync(password, admin.password)) {
       loginAttempts.delete(clientIp);
-      const token = jwt.sign({ id: admin.id, username: admin.username, role: admin.role }, JWT_SECRET, { expiresIn: "10m" });
+      const token = jwt.sign({ id: admin.id, username: admin.username, role: admin.role }, JWT_SECRET, { expiresIn: AUTH_TOKEN_EXPIRES_IN });
       setAuthCookie(res, token);
       res.json({
         token,
@@ -779,7 +819,7 @@ async function startServer() {
         return res.status(403).json({ error: "Account not yet approved. Please contact 0694 128 543" });
       }
 
-      const token = jwt.sign({ id: admin.id, username: admin.username, role: admin.role }, JWT_SECRET, { expiresIn: "10m" });
+      const token = jwt.sign({ id: admin.id, username: admin.username, role: admin.role }, JWT_SECRET, { expiresIn: AUTH_TOKEN_EXPIRES_IN });
       setAuthCookie(res, token);
       return res.json({
         token,
@@ -888,7 +928,7 @@ async function startServer() {
         return res.status(403).json({ error: "Account not yet approved. Please contact 0694 128 543" });
       }
 
-      const token = jwt.sign({ id: admin.id, username: admin.username, role: admin.role }, JWT_SECRET, { expiresIn: "10m" });
+      const token = jwt.sign({ id: admin.id, username: admin.username, role: admin.role }, JWT_SECRET, { expiresIn: AUTH_TOKEN_EXPIRES_IN });
       setAuthCookie(res, token);
       return res.json({
         token,
@@ -1222,7 +1262,7 @@ async function startServer() {
   });
 
   // Submit Attendance
-  app.post("/api/public/submit", (req, res) => {
+  app.post("/api/public/submit", async (req, res) => {
     if (!enforceRateLimit(req, res, "public-submit", 20, 15 * 60 * 1000)) return;
     const { sessionId, name, regNumber, image, lat, lng, deviceFingerprint } = req.body;
     const normalizedRegNumber = normalizeRegNumber(regNumber);
@@ -1306,24 +1346,28 @@ async function startServer() {
        DO UPDATE SET status = 'pending', last_attempt = excluded.last_attempt, expires_at = excluded.expires_at`
     ).run(sessionId, normalizedRegNumber, deviceHash, now, session.expires_at);
 
-    // Create session folder if it doesn't exist
-    const sessionDir = path.join(ATTENDANCE_DIR, sessionId);
-    if (!fs.existsSync(sessionDir)) {
-      fs.mkdirSync(sessionDir, { recursive: true });
-    }
-
-    // Save image to session folder
     const timestamp = Date.now();
     const safeRegNumber = String(regNumber || "student").replace(/[^a-zA-Z0-9_-]/g, "_");
     const filename = `${timestamp}-${safeRegNumber}.jpg`;
-    const imagePath = path.join(sessionDir, filename);
-    const imageUrl = `/api/attendance-images/${sessionId}/${filename}`;
+    const storageObjectPath = `attendance/${sessionId}/${filename}`;
+    let imagePath: string | null = null;
+    let imageUrl = `/api/attendance-images/${sessionId}/${filename}`;
+    let buffer: Buffer;
 
     try {
-      // Convert base64 to buffer and save
       const base64Data = image.replace(/^data:image\/jpeg;base64,/, "");
-      const buffer = Buffer.from(base64Data, "base64");
-      fs.writeFileSync(imagePath, buffer);
+      buffer = Buffer.from(base64Data, "base64");
+      const storageUrl = await uploadSelfieToFirebaseStorage(storageObjectPath, buffer);
+      if (storageUrl) {
+        imageUrl = storageUrl;
+      } else {
+        const sessionDir = path.join(ATTENDANCE_DIR, sessionId);
+        if (!fs.existsSync(sessionDir)) {
+          fs.mkdirSync(sessionDir, { recursive: true });
+        }
+        imagePath = path.join(sessionDir, filename);
+        fs.writeFileSync(imagePath, buffer);
+      }
     } catch (err) {
       return res.status(500).json({ error: "Failed to save image" });
     }
@@ -1335,8 +1379,11 @@ async function startServer() {
         .run(sessionId, name.trim(), normalizedRegNumber, imageUrl, lat, lng, deviceHash);
       attendanceId = result.lastInsertRowid;
     } catch (err: any) {
-      if (fs.existsSync(imagePath)) {
+      if (imagePath && fs.existsSync(imagePath)) {
         fs.unlinkSync(imagePath);
+      }
+      if (isRemoteUrl(imageUrl)) {
+        void deleteSelfieFromFirebaseStorage(imageUrl).catch((deleteErr) => console.error("Failed to delete uploaded selfie:", deleteErr));
       }
       if (String(err?.message || "").includes("UNIQUE")) {
         return res.status(409).json({ error: "Attendance already submitted" });
@@ -1398,7 +1445,7 @@ async function startServer() {
   });
 
   // Delete Attendance Record
-  app.delete("/api/attendance/:id", authenticate, (req, res) => {
+  app.delete("/api/attendance/:id", authenticate, async (req, res) => {
     const { id } = req.params;
     const record: any = db.prepare("SELECT * FROM attendance WHERE id = ?").get(id);
     if (!record) {
@@ -1409,15 +1456,17 @@ async function startServer() {
       return res.status(403).json({ error: "You do not have permission to delete this attendance record" });
     }
 
-    if (record && record.image) {
-      // Delete image file if it exists
+    if (record?.image) {
       try {
-        // Extract filename from URL path
-        const urlParts = record.image.split("/api/attendance-images/");
-        if (urlParts.length > 1) {
-          const imagePath = path.join(ATTENDANCE_DIR, urlParts[1]);
-          if (fs.existsSync(imagePath)) {
-            fs.unlinkSync(imagePath);
+        if (isRemoteUrl(record.image)) {
+          await deleteSelfieFromFirebaseStorage(record.image);
+        } else {
+          const urlParts = record.image.split("/api/attendance-images/");
+          if (urlParts.length > 1) {
+            const imagePath = path.join(ATTENDANCE_DIR, urlParts[1]);
+            if (fs.existsSync(imagePath)) {
+              fs.unlinkSync(imagePath);
+            }
           }
         }
       } catch (err) {
@@ -1479,7 +1528,7 @@ async function startServer() {
     };
     sheet.getRow(1).alignment = { vertical: "middle", horizontal: "center" };
 
-    records.forEach((record, index) => {
+    for (const [index, record] of records.entries()) {
       const rowNumber = index + 2;
       sheet.getRow(rowNumber).values = [
         index + 1,
@@ -1494,12 +1543,13 @@ async function startServer() {
       sheet.getRow(rowNumber).height = 90;
       sheet.getRow(rowNumber).alignment = { vertical: "middle", horizontal: "center", wrapText: true };
 
-      const imagePath = getImagePathFromUrl(record.image);
-      if (imagePath && fs.existsSync(imagePath)) {
-        const extension = path.extname(imagePath).replace(".", "").toLowerCase() || "jpeg";
+      const remoteImageBuffer = await fetchRemoteImageBuffer(record.image);
+      const localImagePath = getImagePathFromUrl(record.image);
+      const imageBuffer = remoteImageBuffer || (localImagePath && fs.existsSync(localImagePath) ? fs.readFileSync(localImagePath) : null);
+      if (imageBuffer) {
         const imageId = workbook.addImage({
-          filename: imagePath,
-          extension: extension === "jpg" ? "jpeg" : extension as "jpeg" | "png" | "gif",
+          buffer: imageBuffer,
+          extension: "jpeg",
         });
 
         sheet.addImage(imageId, {
@@ -1508,7 +1558,7 @@ async function startServer() {
           editAs: "oneCell",
         });
       }
-    });
+    }
 
     const filename = sessionId ? `attendance_${sessionId}.xlsx` : "attendance.xlsx";
     const buffer = await workbook.xlsx.writeBuffer();
@@ -1518,7 +1568,7 @@ async function startServer() {
   });
 
   // Export PDF (all or by session)
-  app.get("/api/export/pdf", authenticate, (req, res) => {
+  app.get("/api/export/pdf", authenticate, async (req, res) => {
     const { sessionId } = req.query;
     let records: any[];
     if (sessionId) {
@@ -1549,7 +1599,7 @@ async function startServer() {
     doc.fontSize(10).fillColor("#475569").text(`Generated: ${new Date().toLocaleString()}`, { align: "center" });
     doc.moveDown(1);
 
-    records.forEach((r, i) => {
+    for (const [i, r] of records.entries()) {
       if (doc.y > 650) {
         doc.addPage();
       }
@@ -1564,10 +1614,12 @@ async function startServer() {
       doc.text(`Time: ${new Date(r.submitted_at).toLocaleString()}`, 58, startY + 76, { width: 250 });
       doc.text(`Location: ${Number(r.lat).toFixed(6)}, ${Number(r.lng).toFixed(6)}`, 290, startY + 40, { width: 120 });
 
+      const remoteImageBuffer = await fetchRemoteImageBuffer(r.image);
       const imagePath = getImagePathFromUrl(r.image);
-      if (imagePath && fs.existsSync(imagePath)) {
+      const imageInput = remoteImageBuffer || (imagePath && fs.existsSync(imagePath) ? imagePath : null);
+      if (imageInput) {
         try {
-          doc.image(imagePath, 430, startY + 14, { fit: [100, 92], align: "center", valign: "center" });
+          doc.image(imageInput, 430, startY + 14, { fit: [100, 92], align: "center", valign: "center" });
         } catch (err) {
           doc.fontSize(10).fillColor("#94A3B8").text("Selfie unavailable", 435, startY + 52);
         }
@@ -1576,7 +1628,7 @@ async function startServer() {
       }
 
       doc.y = startY + 136;
-    });
+    }
     doc.end();
   });
 
