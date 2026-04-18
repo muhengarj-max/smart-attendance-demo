@@ -11,7 +11,7 @@ service cloud.firestore {
       allow create, update: if request.auth != null
         && request.auth.uid == userId
         && request.resource.data.firebase_uid == request.auth.uid
-        && request.resource.data.approved == 0
+        && request.resource.data.approved == 1
         && request.resource.data.role == "admin";
     }
 

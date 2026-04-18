@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { registerWithEmailPassword, sendFirebasePasswordReset, signInWithEmailPassword, signInWithGoogle } from "./firebase";
+import LandingPage from "./LandingPage";
 import PricingSection from "./PricingSection";
 import { 
   Camera, 
@@ -142,6 +143,83 @@ class SecureDeviceFingerprint {
     return this.generateFingerprint();
   }
 }
+
+type BestLocation = {
+  latitude: number;
+  longitude: number;
+  accuracy: number;
+};
+
+const getBestCurrentLocation = async ({
+  desiredAccuracy = 35,
+  timeoutMs = 14000,
+}: {
+  desiredAccuracy?: number;
+  timeoutMs?: number;
+} = {}): Promise<BestLocation> => {
+  if (!("geolocation" in navigator)) {
+    throw new Error("Location is not supported on this device/browser.");
+  }
+
+  return new Promise((resolve, reject) => {
+    let best: GeolocationPosition | null = null;
+    let settled = false;
+    let watchId: number | null = null;
+
+    const finish = (position?: GeolocationPosition | null) => {
+      if (settled) return;
+      settled = true;
+      if (watchId !== null) {
+        navigator.geolocation.clearWatch(watchId);
+      }
+
+      const finalPosition = position || best;
+      if (!finalPosition) {
+        reject(new Error("Unable to get current location. Allow location access and try again."));
+        return;
+      }
+
+      resolve({
+        latitude: finalPosition.coords.latitude,
+        longitude: finalPosition.coords.longitude,
+        accuracy: finalPosition.coords.accuracy || 999,
+      });
+    };
+
+    const onPosition = (position: GeolocationPosition) => {
+      if (!best || position.coords.accuracy < best.coords.accuracy) {
+        best = position;
+      }
+
+      if (position.coords.accuracy <= desiredAccuracy) {
+        finish(position);
+      }
+    };
+
+    const onError = (error: GeolocationPositionError) => {
+      if (best) {
+        finish(best);
+        return;
+      }
+
+      const message =
+        error.code === error.PERMISSION_DENIED
+          ? "Location permission was denied. Allow location access from browser settings."
+          : error.code === error.POSITION_UNAVAILABLE
+            ? "Location is unavailable. Turn on GPS/location services and try again."
+            : "Location timed out. Move near a window or open area and try again.";
+      reject(new Error(message));
+    };
+
+    watchId = navigator.geolocation.watchPosition(onPosition, onError, {
+      enableHighAccuracy: true,
+      maximumAge: 0,
+      timeout: timeoutMs,
+    });
+
+    window.setTimeout(() => finish(best), timeoutMs);
+  });
+};
 
 // --- Components ---
 
@@ -445,6 +523,7 @@ const AdminDashboard = ({
   const [adminUsers, setAdminUsers] = useState<AdminUser[]>([]);
   const [selectedSession, setSelectedSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState(true);
+  const [locatingSession, setLocatingSession] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [createdSessionId, setCreatedSessionId] = useState<string | null>(null);
   const [newSession, setNewSession] = useState({ name: "", lat: "", lng: "", radius: "50", minutes: "60" });
@@ -663,12 +742,21 @@ const AdminDashboard = ({
     }
   };
 
-  const getCurrentLocation = () => {
-    navigator.geolocation.getCurrentPosition((pos) => {
-      setNewSession(prev => ({ ...prev, lat: pos.coords.latitude.toString(), lng: pos.coords.longitude.toString() }));
-    }, () => {
-      alert("Unable to get current location");
-    });
+  const getCurrentLocation = async () => {
+    setLocatingSession(true);
+    try {
+      const location = await getBestCurrentLocation({ desiredAccuracy: 25, timeoutMs: 16000 });
+      setNewSession(prev => ({
+        ...prev,
+        lat: location.latitude.toFixed(7),
+        lng: location.longitude.toFixed(7),
+      }));
+      window.showPrettyMessage?.(`Location set. Accuracy about ${Math.round(location.accuracy)}m.`, location.accuracy <= 50 ? "success" : "warning");
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Unable to get current location");
+    } finally {
+      setLocatingSession(false);
+    }
   };
 
   const handleCreateAdmin = async (e: React.FormEvent) => {
@@ -844,6 +932,20 @@ const AdminDashboard = ({
       </header>
 
       <main className="max-w-7xl mx-auto p-4 sm:p-6">
+        {hasActiveSubscription && currentAdmin.role !== "super_admin" && (
+          <div className="mb-6 rounded-lg border border-emerald-200 bg-emerald-50 px-5 py-4 shadow-sm">
+            <p className="text-xs font-bold uppercase tracking-normal text-emerald-700">Subscription Active</p>
+            <h2 className="mt-1 text-xl font-bold text-slate-900">
+              {currentAdmin.subscription_plan ? `${currentAdmin.subscription_plan} package` : "Paid package"} is active
+            </h2>
+            <p className="mt-1 text-sm text-slate-600">
+              {currentAdmin.subscription_expires_at
+                ? `Your access is active until ${new Date(currentAdmin.subscription_expires_at).toLocaleDateString()}.`
+                : "Your access is active."}
+            </p>
+          </div>
+        )}
+
         {!hasActiveSubscription && (
           <div className="mb-6 overflow-hidden rounded-lg border border-amber-200 bg-white shadow-sm">
             <div className="border-b border-amber-100 bg-amber-50 px-5 py-4">
@@ -1364,10 +1466,11 @@ const AdminDashboard = ({
                 <button 
                   type="button"
                   onClick={getCurrentLocation}
+                  disabled={locatingSession}
                   className="w-full text-blue-600 text-sm font-bold flex items-center justify-center gap-2 py-2 hover:bg-blue-50 rounded-lg transition-colors"
                 >
-                  <MapPin className="w-4 h-4" />
-                  Use Current Location
+                  {locatingSession ? <Loader2 className="h-4 w-4 animate-spin" /> : <MapPin className="w-4 h-4" />}
+                  {locatingSession ? "Getting accurate location..." : "Use Current Location"}
                 </button>
                 <div>
                   <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Radius (meters)</label>
@@ -1692,49 +1795,42 @@ const AttendancePage = ({ sessionId }: { sessionId: string }) => {
 
   const handleSubmitWithImage = async (capturedImage: string) => {
     setStep("submitting");
-    navigator.geolocation.getCurrentPosition(async (pos) => {
-      try {
-        const normalizedRegNumber = normalizeRegNumber(regNumber);
+    try {
+      const location = await getBestCurrentLocation({ desiredAccuracy: 30, timeoutMs: 18000 });
+      const normalizedRegNumber = normalizeRegNumber(regNumber);
 
-        if (isLocallyLocked(normalizedRegNumber, deviceFingerprintRef.current)) {
-          setError("This device has already completed attendance for this registration number.");
-          setStep("error");
-          return;
-        }
+      if (isLocallyLocked(normalizedRegNumber, deviceFingerprintRef.current)) {
+        setError("This device has already completed attendance for this registration number.");
+        setStep("error");
+        return;
+      }
 
-        const res = await fetch("/api/public/submit", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            sessionId,
-            name,
-            regNumber,
-            image: capturedImage,
-            lat: pos.coords.latitude,
-            lng: pos.coords.longitude,
-            deviceFingerprint: deviceFingerprintRef.current
-          }),
-        });
-        const data = await res.json().catch(() => null);
-        if (res.ok) {
-          setPermanentVerificationLock(normalizedRegNumber, deviceFingerprintRef.current);
-          setStep("success");
-        } else {
-          setError(data?.error || "Submission failed");
-          setStep("error");
-        }
-      } catch (err) {
-        setError("Submission failed");
+      const res = await fetch("/api/public/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sessionId,
+          name,
+          regNumber,
+          image: capturedImage,
+          lat: location.latitude,
+          lng: location.longitude,
+          accuracy: location.accuracy,
+          deviceFingerprint: deviceFingerprintRef.current
+        }),
+      });
+      const data = await res.json().catch(() => null);
+      if (res.ok) {
+        setPermanentVerificationLock(normalizedRegNumber, deviceFingerprintRef.current);
+        setStep("success");
+      } else {
+        setError(data?.error || "Submission failed");
         setStep("error");
       }
-    }, (err) => {
-      setError("Location access required for attendance");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Location access required for attendance");
       setStep("error");
-    }, {
-      enableHighAccuracy: true,
-      timeout: 15000,
-      maximumAge: 0
-    });
+    }
   };
 
   const handleSubmit = async () => {
@@ -1990,6 +2086,10 @@ export default function App() {
   if (path.startsWith("/attendance/")) {
     const sessionId = path.split("/")[2];
     return <AttendancePage sessionId={sessionId} />;
+  }
+
+  if (path === "/" && !currentAdmin) {
+    return <LandingPage />;
   }
 
   if (!authReady) {

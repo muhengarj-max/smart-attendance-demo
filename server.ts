@@ -650,6 +650,22 @@ const fetchRemoteImageBuffer = async (imageUrl?: string | null) => {
   return Buffer.from(await response.arrayBuffer());
 };
 
+const compressImageForPdf = async (image: Buffer | string) => {
+  const input = Buffer.isBuffer(image) ? image : fs.readFileSync(image);
+  try {
+    const sharpModule = await import("sharp");
+    const sharp = sharpModule.default;
+    return await sharp(input)
+      .rotate()
+      .resize(180, 180, { fit: "cover", withoutEnlargement: true })
+      .jpeg({ quality: 45, mozjpeg: true })
+      .toBuffer();
+  } catch (err) {
+    console.warn("PDF image compression failed, using original image:", err);
+    return input;
+  }
+};
+
 async function startServer() {
   await restoreFirestoreData();
   db.prepare("UPDATE admins SET approved = 1 WHERE approved != 1").run();
@@ -748,6 +764,16 @@ const app = express();
 
   const cleanupExpiredVerifications = db.prepare("DELETE FROM attendance_verifications WHERE expires_at IS NOT NULL AND expires_at < ?");
   const canManageSession = (admin: any, session: any) => session?.created_by_admin_id === admin?.id;
+  const formatReportDate = (value?: string | null) => {
+    if (!value) return "-";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return date.toLocaleString();
+  };
+  const getReportSessionTitle = (session?: any) => {
+    if (!session) return "All Sessions";
+    return session.name?.trim() || `Session ${session.id}`;
+  };
   const enforceRateLimit = (req: any, res: any, bucket: string, maxRequests: number, windowMs: number) => {
     const key = `${bucket}:${getClientIp(req)}`;
     const nowMs = Date.now();
@@ -975,7 +1001,7 @@ const app = express();
           is_locked: 0,
           firebase_uid: firebaseUid,
           auth_provider: "firebase",
-        });
+        }).catch((err) => console.error("Failed to save Firebase admin fallback:", err));
         const token = jwt.sign({ id: createdAdmin.id, username: createdAdmin.username, role: createdAdmin.role }, JWT_SECRET, { expiresIn: AUTH_TOKEN_EXPIRES_IN });
         setAuthCookie(res, token);
         return res.json({ token, admin: toPublicAdmin(createdAdmin), message: "Account created." });
@@ -1001,7 +1027,12 @@ const app = express();
         admin: toPublicAdmin(admin),
       });
     } catch (err) {
-      return res.status(401).json({ error: "Firebase account verification failed" });
+      console.error("Firebase account verification failed:", err);
+      return res.status(401).json({
+        error: err instanceof Error && err.message.includes("not configured")
+          ? err.message
+          : "Firebase account verification failed",
+      });
     }
   });
 
@@ -1075,7 +1106,7 @@ const app = express();
           is_locked: 0,
           firebase_uid: firebaseUid,
           auth_provider: "google",
-        });
+        }).catch((err) => console.error("Failed to save Google admin fallback:", err));
         const token = jwt.sign({ id: createdAdmin.id, username: createdAdmin.username, role: createdAdmin.role }, JWT_SECRET, { expiresIn: AUTH_TOKEN_EXPIRES_IN });
         setAuthCookie(res, token);
         return res.json({ token, admin: toPublicAdmin(createdAdmin), message: "Google account registered." });
@@ -1433,7 +1464,7 @@ const app = express();
   // Submit Attendance
   app.post("/api/public/submit", async (req, res) => {
     if (!enforceRateLimit(req, res, "public-submit", 20, 15 * 60 * 1000)) return;
-    const { sessionId, name, regNumber, image, lat, lng, deviceFingerprint } = req.body;
+    const { sessionId, name, regNumber, image, lat, lng, accuracy, deviceFingerprint } = req.body;
     const normalizedRegNumber = normalizeRegNumber(regNumber);
 
     if (
@@ -1481,8 +1512,21 @@ const app = express();
     }
 
     const dist = getDistance(lat, lng, session.lat, session.lng);
-    if (dist > session.radius) {
-      return res.status(400).json({ error: `Out of range. Distance: ${(dist * 1000).toFixed(1)}m, Allowed: ${(session.radius * 1000).toFixed(1)}m` });
+    const distanceMeters = dist * 1000;
+    const sessionRadiusMeters = Number(session.radius) * 1000;
+    const gpsAccuracyMeters = Number.isFinite(Number(accuracy)) ? Math.max(0, Number(accuracy)) : 0;
+    const accuracyToleranceMeters = Math.min(gpsAccuracyMeters, 50);
+    const graceDistanceMeters = 30;
+    const allowedMeters = sessionRadiusMeters + accuracyToleranceMeters + graceDistanceMeters;
+    if (gpsAccuracyMeters > 120) {
+      return res.status(400).json({
+        error: `Location accuracy is too low (${gpsAccuracyMeters.toFixed(0)}m). Move outside, turn on GPS, wait a few seconds, then try again.`,
+      });
+    }
+    if (distanceMeters > allowedMeters) {
+      return res.status(400).json({
+        error: `Out of range. Distance: ${distanceMeters.toFixed(1)}m, Allowed: ${sessionRadiusMeters.toFixed(1)}m plus ${graceDistanceMeters}m grace, GPS accuracy: ${gpsAccuracyMeters ? `${gpsAccuracyMeters.toFixed(0)}m` : "unknown"}.`,
+      });
     }
 
     // Device Check (hash the fingerprint for cross-browser uniqueness)
@@ -1655,6 +1699,7 @@ const app = express();
   app.get("/api/export/excel", authenticate, async (req, res) => {
     const { sessionId } = req.query;
     let records: any[];
+    let reportSession: any = null;
 
     if (sessionId) {
       const session: any = db.prepare("SELECT * FROM sessions WHERE id = ?").get(sessionId);
@@ -1664,6 +1709,7 @@ const app = express();
       if (!canManageSession(req.admin, session)) {
         return res.status(403).json({ error: "You do not have permission to export this session" });
       }
+      reportSession = session;
       records = db.prepare("SELECT name, reg_number, session_id, lat, lng, image, submitted_at FROM attendance WHERE session_id = ? ORDER BY submitted_at DESC").all(sessionId);
     } else {
       records = db.prepare(`
@@ -1677,6 +1723,8 @@ const app = express();
 
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet("Attendance");
+    const reportTitle = getReportSessionTitle(reportSession);
+    const sessionCreatedAt = reportSession ? formatReportDate(reportSession.created_at) : "-";
 
     sheet.columns = [
       { header: "No.", key: "index", width: 8 },
@@ -1689,16 +1737,24 @@ const app = express();
       { header: "Selfie", key: "selfie", width: 18 },
     ];
 
-    sheet.getRow(1).font = { bold: true, color: { argb: "FFFFFFFF" } };
-    sheet.getRow(1).fill = {
+    sheet.spliceRows(1, 0, [`Attendance Report - ${reportTitle}`], [`Session Created: ${sessionCreatedAt}`], []);
+    sheet.mergeCells("A1:H1");
+    sheet.mergeCells("A2:H2");
+    sheet.getRow(1).font = { bold: true, size: 16, color: { argb: "FF0F172A" } };
+    sheet.getRow(1).alignment = { horizontal: "center" };
+    sheet.getRow(2).font = { bold: true, color: { argb: "FF475569" } };
+    sheet.getRow(2).alignment = { horizontal: "center" };
+
+    sheet.getRow(4).font = { bold: true, color: { argb: "FFFFFFFF" } };
+    sheet.getRow(4).fill = {
       type: "pattern",
       pattern: "solid",
       fgColor: { argb: "2563EB" },
     };
-    sheet.getRow(1).alignment = { vertical: "middle", horizontal: "center" };
+    sheet.getRow(4).alignment = { vertical: "middle", horizontal: "center" };
 
     for (const [index, record] of records.entries()) {
-      const rowNumber = index + 2;
+      const rowNumber = index + 5;
       sheet.getRow(rowNumber).values = [
         index + 1,
         record.name,
@@ -1740,6 +1796,7 @@ const app = express();
   app.get("/api/export/pdf", authenticate, async (req, res) => {
     const { sessionId } = req.query;
     let records: any[];
+    let reportSession: any = null;
     if (sessionId) {
       const session: any = db.prepare("SELECT * FROM sessions WHERE id = ?").get(sessionId);
       if (!session) {
@@ -1748,6 +1805,7 @@ const app = express();
       if (!canManageSession(req.admin, session)) {
         return res.status(403).json({ error: "You do not have permission to export this session" });
       }
+      reportSession = session;
       records = db.prepare("SELECT name, reg_number, session_id, lat, lng, image, submitted_at FROM attendance WHERE session_id = ? ORDER BY submitted_at DESC").all(sessionId);
     } else {
       records = db.prepare(`
@@ -1763,9 +1821,14 @@ const app = express();
     res.setHeader("Content-Disposition", `attachment; filename=attendance${sessionId ? `_${sessionId}` : ''}.pdf`);
     doc.pipe(res);
 
+    const reportTitle = getReportSessionTitle(reportSession);
+    const sessionCreatedAt = reportSession ? formatReportDate(reportSession.created_at) : "-";
+
     doc.fontSize(20).text("Attendance Report", { align: "center" });
     doc.moveDown(0.5);
-    doc.fontSize(10).fillColor("#475569").text(`Generated: ${new Date().toLocaleString()}`, { align: "center" });
+    doc.fontSize(13).fillColor("#0F172A").text(`Session: ${reportTitle}`, { align: "center" });
+    doc.moveDown(0.25);
+    doc.fontSize(10).fillColor("#475569").text(`Session Created: ${sessionCreatedAt}`, { align: "center" });
     doc.moveDown(1);
 
     for (const [i, r] of records.entries()) {
@@ -1788,7 +1851,8 @@ const app = express();
       const imageInput = remoteImageBuffer || (imagePath && fs.existsSync(imagePath) ? imagePath : null);
       if (imageInput) {
         try {
-          doc.image(imageInput, 430, startY + 14, { fit: [100, 92], align: "center", valign: "center" });
+          const compressedImage = await compressImageForPdf(imageInput);
+          doc.image(compressedImage, 430, startY + 14, { fit: [100, 92], align: "center", valign: "center" });
         } catch (err) {
           doc.fontSize(10).fillColor("#94A3B8").text("Selfie unavailable", 435, startY + 52);
         }
