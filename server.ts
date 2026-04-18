@@ -13,16 +13,23 @@ import fs from "fs";
 import { createHash } from "crypto";
 import { applicationDefault, cert, getApps as getAdminApps, initializeApp as initializeAdminApp } from "firebase-admin/app";
 import { getAuth as getAdminAuth } from "firebase-admin/auth";
+import { getFirestore as getAdminFirestore, type Firestore } from "firebase-admin/firestore";
 // import https from "https";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const db = new Database("attendance.db");
+const DB_PATH = process.env.SQLITE_DB_PATH || process.env.DATABASE_PATH || path.join(process.cwd(), "attendance.db");
+const DB_DIR = path.dirname(DB_PATH);
+if (DB_DIR && DB_DIR !== "." && !fs.existsSync(DB_DIR)) {
+  fs.mkdirSync(DB_DIR, { recursive: true });
+}
+const db = new Database(DB_PATH);
 const NODE_ENV = process.env.NODE_ENV || "development";
 const PORT = Number(process.env.PORT || 3001);
 const IS_PRODUCTION = NODE_ENV === "production";
 const ADMIN_COOKIE_NAME = "admin_token";
+const ATTENDANCE_DIR = process.env.ATTENDANCE_DIR || path.join(process.cwd(), "attendance");
 
 type AdminRow = {
   id: number;
@@ -57,6 +64,7 @@ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const FIREBASE_SERVICE_ACCOUNT_JSON = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
 const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID;
 const hasFirebaseAdminConfig = Boolean(FIREBASE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS || FIREBASE_PROJECT_ID);
+const hasFirestoreCredentials = Boolean(FIREBASE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS);
 
 if ((ADMIN_USERNAME && !ADMIN_PASSWORD) || (!ADMIN_USERNAME && ADMIN_PASSWORD)) {
   throw new Error("ADMIN_USERNAME and ADMIN_PASSWORD must be set together, or both omitted.");
@@ -72,6 +80,7 @@ if (hasFirebaseAdminConfig && !getAdminApps().length) {
     initializeAdminApp({ projectId: FIREBASE_PROJECT_ID });
   }
 }
+const firestoreDb: Firestore | null = hasFirestoreCredentials && getAdminApps().length ? getAdminFirestore() : null;
 
 // Initialize Database
 db.exec(`
@@ -170,13 +179,170 @@ if (!superAdminExists) {
   db.prepare("UPDATE admins SET role = 'super_admin', approved = 1 WHERE username = ?").run(SUPER_ADMIN_USERNAME);
 }
 
+const cleanFirestoreData = (row: Record<string, any>) => {
+  const data: Record<string, any> = {};
+  for (const [key, value] of Object.entries(row)) {
+    if (value !== undefined) {
+      data[key] = value;
+    }
+  }
+  return data;
+};
+
+const mirrorToFirestore = async (collectionName: string, id: string | number | bigint, row: Record<string, any>) => {
+  if (!firestoreDb) return;
+  await firestoreDb.collection(collectionName).doc(String(id)).set(cleanFirestoreData(row), { merge: true });
+};
+
+const deleteFromFirestore = async (collectionName: string, id: string | number | bigint) => {
+  if (!firestoreDb) return;
+  await firestoreDb.collection(collectionName).doc(String(id)).delete();
+};
+
+const syncAdminToFirestore = (id: string | number | bigint) => {
+  const row: any = db.prepare("SELECT * FROM admins WHERE id = ?").get(id);
+  if (row) {
+    void mirrorToFirestore("admins", row.id, row).catch((err) => console.error("Failed to mirror admin:", err));
+  }
+};
+
+const syncSessionToFirestore = (id: string) => {
+  const row: any = db.prepare("SELECT * FROM sessions WHERE id = ?").get(id);
+  if (row) {
+    void mirrorToFirestore("sessions", row.id, row).catch((err) => console.error("Failed to mirror session:", err));
+  }
+};
+
+const syncAttendanceToFirestore = (id: string | number | bigint) => {
+  const row: any = db.prepare("SELECT * FROM attendance WHERE id = ?").get(id);
+  if (row) {
+    void mirrorToFirestore("attendance", row.id, row).catch((err) => console.error("Failed to mirror attendance:", err));
+  }
+};
+
+const restoreFirestoreData = async () => {
+  if (!firestoreDb) {
+    console.warn("Firestore persistence is disabled. Set FIREBASE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS to keep data after Render restarts.");
+    return;
+  }
+
+  const [adminSnapshot, sessionSnapshot, attendanceSnapshot] = await Promise.all([
+    firestoreDb.collection("admins").get(),
+    firestoreDb.collection("sessions").get(),
+    firestoreDb.collection("attendance").get(),
+  ]);
+
+  const upsertAdmin = db.prepare(`
+    INSERT INTO admins (id, username, password, role, approved, is_locked, locked_until, created_at, firebase_uid, auth_provider)
+    VALUES (@id, @username, @password, @role, @approved, @is_locked, @locked_until, @created_at, @firebase_uid, @auth_provider)
+    ON CONFLICT(id) DO UPDATE SET
+      username = excluded.username,
+      password = excluded.password,
+      role = excluded.role,
+      approved = excluded.approved,
+      is_locked = excluded.is_locked,
+      locked_until = excluded.locked_until,
+      created_at = excluded.created_at,
+      firebase_uid = excluded.firebase_uid,
+      auth_provider = excluded.auth_provider
+  `);
+  const upsertSession = db.prepare(`
+    INSERT INTO sessions (id, name, created_by_admin_id, lat, lng, radius, expires_at, is_active, deleted_at, created_at)
+    VALUES (@id, @name, @created_by_admin_id, @lat, @lng, @radius, @expires_at, @is_active, @deleted_at, @created_at)
+    ON CONFLICT(id) DO UPDATE SET
+      name = excluded.name,
+      created_by_admin_id = excluded.created_by_admin_id,
+      lat = excluded.lat,
+      lng = excluded.lng,
+      radius = excluded.radius,
+      expires_at = excluded.expires_at,
+      is_active = excluded.is_active,
+      deleted_at = excluded.deleted_at,
+      created_at = excluded.created_at
+  `);
+  const upsertAttendance = db.prepare(`
+    INSERT INTO attendance (id, session_id, name, reg_number, image, lat, lng, device_fingerprint, submitted_at)
+    VALUES (@id, @session_id, @name, @reg_number, @image, @lat, @lng, @device_fingerprint, @submitted_at)
+    ON CONFLICT(id) DO UPDATE SET
+      session_id = excluded.session_id,
+      name = excluded.name,
+      reg_number = excluded.reg_number,
+      image = excluded.image,
+      lat = excluded.lat,
+      lng = excluded.lng,
+      device_fingerprint = excluded.device_fingerprint,
+      submitted_at = excluded.submitted_at
+  `);
+
+  const restoreTransaction = db.transaction(() => {
+    for (const doc of adminSnapshot.docs) {
+      const data = doc.data();
+      upsertAdmin.run({
+        id: Number(data.id || doc.id),
+        username: data.username,
+        password: data.password || "",
+        role: data.role || "admin",
+        approved: Number(data.approved || 0),
+        is_locked: Number(data.is_locked || 0),
+        locked_until: data.locked_until || null,
+        created_at: data.created_at || null,
+        firebase_uid: data.firebase_uid || null,
+        auth_provider: data.auth_provider || null,
+      });
+    }
+
+    for (const doc of sessionSnapshot.docs) {
+      const data = doc.data();
+      upsertSession.run({
+        id: String(data.id || doc.id),
+        name: data.name || null,
+        created_by_admin_id: data.created_by_admin_id ?? null,
+        lat: data.lat ?? null,
+        lng: data.lng ?? null,
+        radius: data.radius ?? null,
+        expires_at: data.expires_at || null,
+        is_active: Number(data.is_active ?? 1),
+        deleted_at: data.deleted_at || null,
+        created_at: data.created_at || null,
+      });
+    }
+
+    for (const doc of attendanceSnapshot.docs) {
+      const data = doc.data();
+      upsertAttendance.run({
+        id: Number(data.id || doc.id),
+        session_id: data.session_id,
+        name: data.name,
+        reg_number: data.reg_number,
+        image: data.image || "",
+        lat: data.lat ?? null,
+        lng: data.lng ?? null,
+        device_fingerprint: data.device_fingerprint || null,
+        submitted_at: data.submitted_at || null,
+      });
+    }
+  });
+
+  restoreTransaction();
+  const localAdmins: any[] = db.prepare("SELECT * FROM admins").all();
+  const localSessions: any[] = db.prepare("SELECT * FROM sessions").all();
+  const localAttendance: any[] = db.prepare("SELECT * FROM attendance").all();
+  await Promise.all([
+    ...localAdmins.map((row) => mirrorToFirestore("admins", row.id, row)),
+    ...localSessions.map((row) => mirrorToFirestore("sessions", row.id, row)),
+    ...localAttendance.map((row) => mirrorToFirestore("attendance", row.id, row)),
+  ]);
+  console.log(`Restored Firestore data: ${adminSnapshot.size} admins, ${sessionSnapshot.size} sessions, ${attendanceSnapshot.size} attendance records.`);
+};
+
 async function startServer() {
+  await restoreFirestoreData();
+
   const app = express();
   // const options = {
   //   key: fs.readFileSync(path.join(__dirname, 'key.pem')),
   //   cert: fs.readFileSync(path.join(__dirname, 'cert.pem')),
   // };
-  const ATTENDANCE_DIR = path.join(process.cwd(), "attendance");
   const loginAttempts = new Map<string, { count: number; firstAttemptAt: number }>();
   const publicRateLimits = new Map<string, { count: number; firstRequestAt: number }>();
 
@@ -418,7 +584,8 @@ async function startServer() {
     }
 
     const hashedPassword = bcrypt.hashSync(password, 10);
-    db.prepare("INSERT INTO admins (username, password, role, approved) VALUES (?, ?, 'admin', 0)").run(username.trim(), hashedPassword);
+    const result = db.prepare("INSERT INTO admins (username, password, role, approved) VALUES (?, ?, 'admin', 0)").run(username.trim(), hashedPassword);
+    syncAdminToFirestore(result.lastInsertRowid);
     res.json({ success: true, message: "Wait for Aproval" });
   });
 
@@ -450,6 +617,7 @@ async function startServer() {
           if (!admin.firebase_uid) {
             db.prepare("UPDATE admins SET firebase_uid = ?, auth_provider = 'google' WHERE id = ?").run(firebaseUid, admin.id);
             admin = { ...admin, firebase_uid: firebaseUid, auth_provider: "google" };
+            syncAdminToFirestore(admin.id);
           }
           return res.json({
             success: true,
@@ -460,8 +628,9 @@ async function startServer() {
         }
 
         const generatedPassword = bcrypt.hashSync(uuidv4(), 10);
-        db.prepare("INSERT INTO admins (username, password, role, approved, firebase_uid, auth_provider) VALUES (?, ?, 'admin', 0, ?, 'google')")
+        const result = db.prepare("INSERT INTO admins (username, password, role, approved, firebase_uid, auth_provider) VALUES (?, ?, 'admin', 0, ?, 'google')")
           .run(email, generatedPassword, firebaseUid);
+        syncAdminToFirestore(result.lastInsertRowid);
         return res.json({ success: true, message: "Google account registered. Wait for Super Admin approval." });
       }
 
@@ -472,6 +641,7 @@ async function startServer() {
       if (!admin.firebase_uid) {
         db.prepare("UPDATE admins SET firebase_uid = ?, auth_provider = 'google' WHERE id = ?").run(firebaseUid, admin.id);
         admin = { ...admin, firebase_uid: firebaseUid, auth_provider: "google" };
+        syncAdminToFirestore(admin.id);
       }
 
       if (admin.is_locked === 1) {
@@ -526,7 +696,8 @@ async function startServer() {
       return res.status(409).json({ error: "Admin username already exists" });
     }
     const hashedPassword = bcrypt.hashSync(password, 10);
-    db.prepare("INSERT INTO admins (username, password, role, approved) VALUES (?, ?, ?, 1)").run(username.trim(), hashedPassword, role);
+    const result = db.prepare("INSERT INTO admins (username, password, role, approved) VALUES (?, ?, ?, 1)").run(username.trim(), hashedPassword, role);
+    syncAdminToFirestore(result.lastInsertRowid);
     res.json({ success: true });
   });
 
@@ -540,6 +711,7 @@ async function startServer() {
       return res.status(403).json({ error: "Super admin accounts are already approved" });
     }
     db.prepare("UPDATE admins SET approved = 1 WHERE id = ?").run(id);
+    syncAdminToFirestore(id);
     res.json({ success: true });
   });
 
@@ -556,6 +728,7 @@ async function startServer() {
       return res.status(403).json({ error: "Cannot delete another super admin account" });
     }
     db.prepare("DELETE FROM admins WHERE id = ?").run(id);
+    void deleteFromFirestore("admins", id).catch((err) => console.error("Failed to delete admin mirror:", err));
     res.json({ success: true });
   });
 
@@ -572,6 +745,7 @@ async function startServer() {
       return res.status(403).json({ error: "Cannot lock another super admin account" });
     }
     db.prepare("UPDATE admins SET is_locked = 1, locked_until = NULL WHERE id = ?").run(id);
+    syncAdminToFirestore(id);
     res.json({ success: true });
   });
 
@@ -585,6 +759,7 @@ async function startServer() {
       return res.status(403).json({ error: "Cannot modify another super admin account" });
     }
     db.prepare("UPDATE admins SET is_locked = 0, locked_until = NULL WHERE id = ?").run(id);
+    syncAdminToFirestore(id);
     res.json({ success: true });
   });
 
@@ -607,6 +782,7 @@ async function startServer() {
 
     const hashedPassword = bcrypt.hashSync(newPassword, 10);
     db.prepare("UPDATE admins SET password = ? WHERE id = ?").run(hashedPassword, id);
+    syncAdminToFirestore(id);
     res.json({ success: true });
   });
 
@@ -636,6 +812,7 @@ async function startServer() {
 
     const hashedPassword = bcrypt.hashSync(newPassword, 10);
     db.prepare("UPDATE admins SET password = ? WHERE id = ?").run(hashedPassword, req.admin.id);
+    syncAdminToFirestore(req.admin.id);
     clearAuthCookie(res);
     res.json({ success: true, message: "Password changed successfully. Please log in again." });
   });
@@ -666,6 +843,7 @@ async function startServer() {
     const expiresAt = new Date(Date.now() + minutes * 60000).toISOString();
     db.prepare("INSERT INTO sessions (id, name, created_by_admin_id, lat, lng, radius, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
       .run(id, name.trim(), req.admin.id, lat, lng, radius / 1000, expiresAt); // radius in km
+    syncSessionToFirestore(id);
     res.json({ id });
   });
 
@@ -681,6 +859,7 @@ async function startServer() {
     }
 
     db.prepare("UPDATE sessions SET is_active = 0, deleted_at = ? WHERE id = ?").run(new Date().toISOString(), id);
+    syncSessionToFirestore(id);
     res.json({ success: true });
   });
 
@@ -711,6 +890,7 @@ async function startServer() {
       return res.status(403).json({ error: "You do not have permission to update this session" });
     }
     db.prepare("UPDATE sessions SET is_active = ? WHERE id = ?").run(is_active ? 1 : 0, id);
+    syncSessionToFirestore(id);
     res.json({ success: true });
   });
 
@@ -912,9 +1092,11 @@ async function startServer() {
     }
 
     // Save record with image URL path
+    let attendanceId: number | bigint;
     try {
-      db.prepare("INSERT INTO attendance (session_id, name, reg_number, image, lat, lng, device_fingerprint) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      const result = db.prepare("INSERT INTO attendance (session_id, name, reg_number, image, lat, lng, device_fingerprint) VALUES (?, ?, ?, ?, ?, ?, ?)")
         .run(sessionId, name.trim(), normalizedRegNumber, imageUrl, lat, lng, deviceHash);
+      attendanceId = result.lastInsertRowid;
     } catch (err: any) {
       if (fs.existsSync(imagePath)) {
         fs.unlinkSync(imagePath);
@@ -924,6 +1106,7 @@ async function startServer() {
       }
       return res.status(500).json({ error: "Failed to save attendance" });
     }
+    syncAttendanceToFirestore(attendanceId);
 
     db.prepare(
       `UPDATE attendance_verifications
@@ -1006,6 +1189,7 @@ async function startServer() {
     }
 
     db.prepare("DELETE FROM attendance WHERE id = ?").run(id);
+    void deleteFromFirestore("attendance", id).catch((err) => console.error("Failed to delete attendance mirror:", err));
     if (record?.session_id && record?.reg_number) {
       db.prepare("DELETE FROM attendance_verifications WHERE session_id = ? AND reg_number = ?").run(record.session_id, record.reg_number);
     }
