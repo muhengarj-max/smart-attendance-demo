@@ -1,6 +1,5 @@
 import "dotenv/config";
 import express from "express";
-import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
 import Database from "better-sqlite3";
@@ -28,6 +27,8 @@ const db = new Database(DB_PATH);
 const NODE_ENV = process.env.NODE_ENV || "development";
 const PORT = Number(process.env.PORT || 3001);
 const IS_PRODUCTION = NODE_ENV === "production";
+const IS_RENDER = process.env.RENDER === "true" || Boolean(process.env.RENDER_SERVICE_ID);
+const USE_VITE_DEV_SERVER = NODE_ENV !== "production" && !IS_RENDER;
 const ADMIN_COOKIE_NAME = "admin_token";
 const ATTENDANCE_DIR = process.env.ATTENDANCE_DIR || path.join(process.cwd(), "attendance");
 
@@ -1581,7 +1582,8 @@ async function startServer() {
 
   // --- VITE MIDDLEWARE ---
 
-  if (process.env.NODE_ENV !== "production") {
+  if (USE_VITE_DEV_SERVER) {
+    const { createServer: createViteServer } = await import("vite");
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
@@ -1601,7 +1603,7 @@ async function startServer() {
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Server running on http://localhost:${PORT} (${USE_VITE_DEV_SERVER ? "vite dev" : "static dist"})`);
   });
 }
 
