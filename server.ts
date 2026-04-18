@@ -952,6 +952,10 @@ const app = express();
         return res.status(403).json({ error: "Use an account with an email address" });
       }
 
+      if (decoded.email_verified !== true) {
+        return res.status(403).json({ error: "Email is not verified. Open the Firebase verification link sent to your email, then sign in again." });
+      }
+
       let admin: any = db.prepare("SELECT * FROM admins WHERE firebase_uid = ? OR lower(username) = ?").get(firebaseUid, email);
       if (!admin) {
         const firebaseAdmin = await getGoogleAdminFromFirestoreRest(firebaseUid, idToken).catch((err) => {
@@ -1008,7 +1012,21 @@ const app = express();
       }
 
       if (!admin) {
-        return res.status(404).json({ error: "Account is not registered. Create account first." });
+        const generatedPassword = bcrypt.hashSync(uuidv4(), 10);
+        const result = db.prepare("INSERT INTO admins (username, password, role, approved, firebase_uid, auth_provider) VALUES (?, ?, 'admin', 1, ?, 'firebase')")
+          .run(email, generatedPassword, firebaseUid);
+        syncAdminToFirestore(result.lastInsertRowid);
+        admin = db.prepare("SELECT * FROM admins WHERE id = ?").get(result.lastInsertRowid);
+        await saveGoogleAdminToFirestoreRest(firebaseUid, idToken, {
+          id: Number(result.lastInsertRowid),
+          username: email,
+          email,
+          role: "admin",
+          approved: 1,
+          is_locked: 0,
+          firebase_uid: firebaseUid,
+          auth_provider: "firebase",
+        }).catch((err) => console.error("Failed to save Firebase admin fallback:", err));
       }
 
       if (!admin.firebase_uid) {
