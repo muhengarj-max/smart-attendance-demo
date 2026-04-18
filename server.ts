@@ -952,10 +952,6 @@ const app = express();
         return res.status(403).json({ error: "Use an account with an email address" });
       }
 
-      if (decoded.email_verified !== true) {
-        return res.status(403).json({ error: "Email is not verified. Open the Firebase verification link sent to your email, then sign in again." });
-      }
-
       let admin: any = db.prepare("SELECT * FROM admins WHERE firebase_uid = ? OR lower(username) = ?").get(firebaseUid, email);
       if (!admin) {
         const firebaseAdmin = await getGoogleAdminFromFirestoreRest(firebaseUid, idToken).catch((err) => {
@@ -1071,8 +1067,8 @@ const app = express();
       const email = String(decoded.email || "").trim().toLowerCase();
       const firebaseUid = decoded.uid;
 
-      if (!email || decoded.email_verified !== true) {
-        return res.status(403).json({ error: "Use a verified Google account email" });
+      if (!email) {
+        return res.status(403).json({ error: "Use a Google account with an email address" });
       }
 
       let admin: any = db.prepare("SELECT * FROM admins WHERE firebase_uid = ? OR lower(username) = ?").get(firebaseUid, email);

@@ -249,33 +249,30 @@ const AdminLogin = ({
     setSuccess("");
     try {
       const email = username.trim().toLowerCase();
-      if (isSignup) {
-        await registerWithEmailPassword(email, password);
-        setSuccess("Account created. Check your email and click the Firebase verification link, then sign in.");
-        setPassword("");
-        setIsSignup(false);
-        return;
-      }
-
-      const idToken = await signInWithEmailPassword(email, password);
+      const idToken = isSignup
+        ? await registerWithEmailPassword(email, password)
+        : await signInWithEmailPassword(email, password);
       const res = await fetch("/api/admin/firebase-auth", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ idToken, mode: "login" }),
+        body: JSON.stringify({ idToken, mode: isSignup ? "register" : "login" }),
       });
       const data = await res.json().catch(() => null);
       if (res.ok && data?.admin) {
         onLogin(data.admin);
+      } else if (res.ok && isSignup) {
+        setSuccess(data?.message || "Account created. You can sign in now.");
+        setUsername("");
+        setPassword("");
+        setIsSignup(false);
       } else {
-        setError(data?.error || "Login failed");
+        setError(data?.error || (isSignup ? "Signup failed" : "Login failed"));
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : "";
       setError(
         message.includes("auth/email-already-in-use")
           ? "This email already has an account. Sign in instead."
-          : message.includes("auth/email-not-verified")
-            ? "Your email is not verified yet. Check your inbox and click the Firebase verification link, then sign in again."
           : message.includes("auth/invalid-credential")
             ? "Invalid email or password."
             : message.includes("auth/operation-not-allowed")

@@ -4,11 +4,9 @@ import {
   createUserWithEmailAndPassword,
   getAuth,
   GoogleAuthProvider,
-  sendEmailVerification,
   sendPasswordResetEmail,
   signInWithEmailAndPassword as firebaseSignInWithEmailAndPassword,
   signInWithPopup,
-  signOut,
   type Auth,
 } from "firebase/auth";
 import { getFirestore, type Firestore } from "firebase/firestore";
@@ -103,10 +101,7 @@ export const registerWithEmailPassword = async (email: string, password: string)
   }
 
   const credential = await createUserWithEmailAndPassword(services.auth, email, password);
-  await sendEmailVerification(credential.user, {
-    url: `${window.location.origin}/login`,
-  });
-  await signOut(services.auth);
+  return credential.user.getIdToken();
 };
 
 export const signInWithEmailPassword = async (email: string, password: string) => {
@@ -116,15 +111,6 @@ export const signInWithEmailPassword = async (email: string, password: string) =
   }
 
   const credential = await firebaseSignInWithEmailAndPassword(services.auth, email, password);
-  await credential.user.reload();
-  if (!credential.user.emailVerified) {
-    await sendEmailVerification(credential.user, {
-      url: `${window.location.origin}/login`,
-    }).catch(() => undefined);
-    await signOut(services.auth);
-    throw new Error("auth/email-not-verified");
-  }
-
   return credential.user.getIdToken();
 };
 
