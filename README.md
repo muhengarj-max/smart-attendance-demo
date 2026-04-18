@@ -21,7 +21,7 @@ This contains everything you need to run the app locally.
    Firebase values use the `VITE_FIREBASE_` names shown in `.env.example`.
    Firestore and selfie Storage persistence on Render require Firebase Admin credentials: set `FIREBASE_SERVICE_ACCOUNT_JSON` or `GOOGLE_APPLICATION_CREDENTIALS`, plus `FIREBASE_STORAGE_BUCKET`.
    Without those credentials the app can still run, but SQLite data can reset on free hosting restarts.
-   Enable Firebase Authentication providers for Email/Password, Google, and Apple in the Firebase Console.
+   Enable Firebase Authentication providers for Email/Password and Google in the Firebase Console.
    Firestore and Storage rules are in `firestore.rules` and `storage.rules`; they require Firebase Auth users with `users/{uid}.approved == true`.
 4. Run the app:
    `npm run dev`

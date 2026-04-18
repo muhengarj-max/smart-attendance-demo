@@ -271,6 +271,43 @@ const saveGoogleAdminToFirestoreRest = async (firebaseUid: string, idToken: stri
   }
 };
 
+const verifyFirebaseAccountToken = async (idToken: string) => {
+  if (getAdminApps().length) {
+    try {
+      return await getAdminAuth().verifyIdToken(idToken);
+    } catch (err) {
+      console.error("Firebase Admin token verification failed, trying REST fallback:", err);
+    }
+  }
+
+  if (!FIREBASE_WEB_API_KEY) {
+    throw new Error("Firebase token verification is not configured");
+  }
+
+  const response = await fetch(`https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(FIREBASE_WEB_API_KEY)}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ idToken }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`Firebase REST token verification failed${text ? `: ${text}` : ""}`);
+  }
+
+  const data: any = await response.json();
+  const user = data.users?.[0];
+  if (!user?.localId) {
+    throw new Error("Firebase account was not found");
+  }
+
+  return {
+    uid: user.localId,
+    email: user.email,
+    email_verified: user.emailVerified === true,
+  };
+};
+
 const mirrorToFirestore = async (collectionName: string, id: string | number | bigint, row: Record<string, any>) => {
   if (!firestoreDb) return;
   await firestoreDb.collection(collectionName).doc(String(id)).set(cleanFirestoreData(row), { merge: true });
@@ -741,7 +778,7 @@ async function startServer() {
     }
 
     try {
-      const decoded = await getAdminAuth().verifyIdToken(idToken);
+      const decoded = await verifyFirebaseAccountToken(idToken);
       const email = String(decoded.email || "").trim().toLowerCase();
       const firebaseUid = decoded.uid;
 
@@ -850,7 +887,7 @@ async function startServer() {
     }
 
     try {
-      const decoded = await getAdminAuth().verifyIdToken(idToken);
+      const decoded = await verifyFirebaseAccountToken(idToken);
       const email = String(decoded.email || "").trim().toLowerCase();
       const firebaseUid = decoded.uid;
 
