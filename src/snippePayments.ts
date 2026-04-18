@@ -1,5 +1,6 @@
 export type SnippeMobilePaymentInput = {
   amount: number;
+  planId: string;
   phoneNumber: string;
   firstname: string;
   lastname: string;
@@ -10,6 +11,7 @@ export type SnippeMobilePaymentInput = {
 export const startSnippeMobilePayment = async (input: SnippeMobilePaymentInput) => {
   const response = await fetch("/api/payments/snippe/mobile", {
     method: "POST",
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
     },
@@ -25,7 +27,7 @@ export const startSnippeMobilePayment = async (input: SnippeMobilePaymentInput) 
 };
 
 export const getSnippePaymentStatus = async (reference: string) => {
-  const response = await fetch(`/api/payments/snippe/${encodeURIComponent(reference)}`);
+  const response = await fetch(`/api/payments/snippe/${encodeURIComponent(reference)}`, { credentials: "include" });
   const result = await response.json().catch(() => ({}));
 
   if (!response.ok) {

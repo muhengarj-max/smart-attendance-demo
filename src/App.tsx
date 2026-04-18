@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { registerWithEmailPassword, sendFirebasePasswordReset, signInWithEmailPassword, signInWithGoogle } from "./firebase";
+import PricingSection from "./PricingSection";
 import { 
   Camera, 
   MapPin, 
@@ -50,6 +51,10 @@ interface CurrentAdmin {
   approved: number;
   is_locked: number;
   locked_until?: string | null;
+  subscription_plan?: string | null;
+  subscription_status?: string | null;
+  subscription_expires_at?: string | null;
+  subscription_payment_reference?: string | null;
 }
 
 interface AdminUser {
@@ -447,6 +452,11 @@ const AdminDashboard = ({
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [totalRecords, setTotalRecords] = useState(0);
+  const hasActiveSubscription =
+    currentAdmin.role === "super_admin" ||
+    (currentAdmin.subscription_status === "active" &&
+      Boolean(currentAdmin.subscription_expires_at) &&
+      new Date(currentAdmin.subscription_expires_at as string).getTime() > Date.now());
 
   const fetchAdmins = async () => {
     if (currentAdmin.role !== "super_admin") {
@@ -805,7 +815,13 @@ const AdminDashboard = ({
               <p className="text-sm font-bold text-slate-900">{currentAdmin.username}</p>
             </div>
             <button 
-              onClick={() => setShowCreate(true)}
+              onClick={() => {
+                if (!hasActiveSubscription) {
+                  window.showPrettyMessage?.("Choose and pay for a package before creating a new session.", "warning");
+                  return;
+                }
+                setShowCreate(true);
+              }}
               className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2 rounded-lg flex items-center gap-2 text-sm font-medium transition-all"
             >
               <Plus className="w-4 h-4" />
@@ -822,6 +838,19 @@ const AdminDashboard = ({
       </header>
 
       <main className="max-w-7xl mx-auto p-4 sm:p-6">
+        {!hasActiveSubscription && (
+          <div className="mb-6 overflow-hidden rounded-lg border border-amber-200 bg-white shadow-sm">
+            <div className="border-b border-amber-100 bg-amber-50 px-5 py-4">
+              <p className="text-xs font-bold uppercase tracking-normal text-amber-700">Payment Required</p>
+              <h2 className="mt-1 text-xl font-bold text-slate-900">Choose a package to create sessions</h2>
+              <p className="mt-1 text-sm text-slate-600">
+                Your account is approved, but attendance sessions are available after an active subscription.
+              </p>
+            </div>
+            <PricingSection currentAdmin={currentAdmin} onPaymentStarted={() => fetch("/api/admin/me", { credentials: "include" }).then((res) => res.ok ? res.json() : null).then(() => undefined)} />
+          </div>
+        )}
+
         <AnimatePresence>
           {welcomeName && (
             <motion.div

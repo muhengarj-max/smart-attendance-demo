@@ -42,6 +42,10 @@ type AdminRow = {
   approved?: number;
   is_locked?: number;
   locked_until?: string | null;
+  subscription_plan?: string | null;
+  subscription_status?: string | null;
+  subscription_expires_at?: string | null;
+  subscription_payment_reference?: string | null;
 };
 
 declare global {
@@ -163,6 +167,11 @@ ensureColumn("admins", "locked_until", "DATETIME");
 ensureColumn("admins", "created_at", "DATETIME");
 ensureColumn("admins", "firebase_uid", "TEXT");
 ensureColumn("admins", "auth_provider", "TEXT");
+ensureColumn("admins", "subscription_plan", "TEXT");
+ensureColumn("admins", "subscription_status", "TEXT NOT NULL DEFAULT 'inactive'");
+ensureColumn("admins", "subscription_started_at", "DATETIME");
+ensureColumn("admins", "subscription_expires_at", "DATETIME");
+ensureColumn("admins", "subscription_payment_reference", "TEXT");
 ensureColumn("sessions", "created_by_admin_id", "INTEGER");
 ensureColumn("sessions", "deleted_at", "DATETIME");
 db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_admins_firebase_uid ON admins(firebase_uid) WHERE firebase_uid IS NOT NULL");
@@ -342,6 +351,63 @@ const syncAttendanceToFirestore = (id: string | number | bigint) => {
   }
 };
 
+const SUBSCRIPTION_PLANS = {
+  monthly: { amount: 25000, months: 1, label: "Monthly Plan" },
+  quarterly: { amount: 70000, months: 3, label: "Quarterly Plan" },
+  annual: { amount: 180000, months: 12, label: "Annual Plan" },
+} as const;
+
+type SubscriptionPlanId = keyof typeof SUBSCRIPTION_PLANS;
+
+const getSubscriptionPlan = (planId: unknown, amount?: number): SubscriptionPlanId | null => {
+  const id = String(planId || "").trim().toLowerCase();
+  if (id in SUBSCRIPTION_PLANS) return id as SubscriptionPlanId;
+
+  const entry = Object.entries(SUBSCRIPTION_PLANS).find(([, plan]) => plan.amount === amount);
+  return entry ? (entry[0] as SubscriptionPlanId) : null;
+};
+
+const addPlanMonths = (date: Date, months: number) => {
+  const result = new Date(date);
+  result.setMonth(result.getMonth() + months);
+  return result;
+};
+
+const hasActiveSubscription = (admin: Pick<AdminRow, "role" | "subscription_status" | "subscription_expires_at">) => {
+  if (admin.role === "super_admin") return true;
+  if (admin.subscription_status !== "active" || !admin.subscription_expires_at) return false;
+  return new Date(admin.subscription_expires_at).getTime() > Date.now();
+};
+
+const activateAdminSubscription = async (adminId: unknown, planId: unknown, reference: string) => {
+  const id = Number(adminId);
+  if (!Number.isInteger(id)) return false;
+
+  const planKey = getSubscriptionPlan(planId);
+  if (!planKey) return false;
+
+  const plan = SUBSCRIPTION_PLANS[planKey];
+  const now = new Date();
+  const admin = db.prepare("SELECT id, subscription_expires_at FROM admins WHERE id = ?").get(id) as AdminRow | undefined;
+  if (!admin) return false;
+
+  const currentExpiry = admin.subscription_expires_at ? new Date(admin.subscription_expires_at) : now;
+  const startsFrom = currentExpiry.getTime() > now.getTime() ? currentExpiry : now;
+  const expiresAt = addPlanMonths(startsFrom, plan.months).toISOString();
+
+  db.prepare(`
+    UPDATE admins
+    SET subscription_plan = ?,
+        subscription_status = 'active',
+        subscription_started_at = COALESCE(subscription_started_at, ?),
+        subscription_expires_at = ?,
+        subscription_payment_reference = ?
+    WHERE id = ?
+  `).run(planKey, now.toISOString(), expiresAt, reference, id);
+  syncAdminToFirestore(id);
+  return true;
+};
+
 const restoreFirestoreData = async () => {
   if (!firestoreDb) {
     console.warn("Firestore persistence is disabled. Set FIREBASE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS to keep data after Render restarts.");
@@ -355,8 +421,8 @@ const restoreFirestoreData = async () => {
   ]);
 
   const upsertAdmin = db.prepare(`
-    INSERT INTO admins (id, username, password, role, approved, is_locked, locked_until, created_at, firebase_uid, auth_provider)
-    VALUES (@id, @username, @password, @role, @approved, @is_locked, @locked_until, @created_at, @firebase_uid, @auth_provider)
+    INSERT INTO admins (id, username, password, role, approved, is_locked, locked_until, created_at, firebase_uid, auth_provider, subscription_plan, subscription_status, subscription_started_at, subscription_expires_at, subscription_payment_reference)
+    VALUES (@id, @username, @password, @role, @approved, @is_locked, @locked_until, @created_at, @firebase_uid, @auth_provider, @subscription_plan, @subscription_status, @subscription_started_at, @subscription_expires_at, @subscription_payment_reference)
     ON CONFLICT(id) DO UPDATE SET
       username = excluded.username,
       password = excluded.password,
@@ -366,7 +432,12 @@ const restoreFirestoreData = async () => {
       locked_until = excluded.locked_until,
       created_at = excluded.created_at,
       firebase_uid = excluded.firebase_uid,
-      auth_provider = excluded.auth_provider
+      auth_provider = excluded.auth_provider,
+      subscription_plan = excluded.subscription_plan,
+      subscription_status = excluded.subscription_status,
+      subscription_started_at = excluded.subscription_started_at,
+      subscription_expires_at = excluded.subscription_expires_at,
+      subscription_payment_reference = excluded.subscription_payment_reference
   `);
   const upsertSession = db.prepare(`
     INSERT INTO sessions (id, name, created_by_admin_id, lat, lng, radius, expires_at, is_active, deleted_at, created_at)
@@ -410,6 +481,11 @@ const restoreFirestoreData = async () => {
         created_at: data.created_at || null,
         firebase_uid: data.firebase_uid || null,
         auth_provider: data.auth_provider || null,
+        subscription_plan: data.subscription_plan || null,
+        subscription_status: data.subscription_status || "inactive",
+        subscription_started_at: data.subscription_started_at || null,
+        subscription_expires_at: data.subscription_expires_at || null,
+        subscription_payment_reference: data.subscription_payment_reference || null,
       });
     }
 
@@ -515,7 +591,6 @@ async function startServer() {
   await restoreFirestoreData();
 
 const app = express();
-registerSnippePaymentRoutes(app);
   // const options = {
   //   key: fs.readFileSync(path.join(__dirname, 'key.pem')),
   //   cert: fs.readFileSync(path.join(__dirname, 'cert.pem')),
@@ -528,7 +603,12 @@ registerSnippePaymentRoutes(app);
     fs.mkdirSync(ATTENDANCE_DIR, { recursive: true });
   }
 
-  app.use(express.json({ limit: "6mb" }));
+  app.use(express.json({
+    limit: "6mb",
+    verify: (req: any, _res, buf) => {
+      req.rawBody = buf.toString("utf8");
+    },
+  }));
 
   const getImagePathFromUrl = (imageUrl?: string | null) => {
     if (!imageUrl) return null;
@@ -649,7 +729,7 @@ registerSnippePaymentRoutes(app);
       res.status(401).json({ error: "Invalid token" });
       return;
     }
-    const admin: any = db.prepare("SELECT id, username, role, approved, is_locked, locked_until FROM admins WHERE id = ?").get((decoded as any).id);
+    const admin: any = db.prepare("SELECT id, username, role, approved, is_locked, locked_until, subscription_plan, subscription_status, subscription_expires_at, subscription_payment_reference FROM admins WHERE id = ?").get((decoded as any).id);
     if (!admin) {
       res.status(401).json({ error: "Admin account not found" });
       return;
@@ -675,6 +755,8 @@ registerSnippePaymentRoutes(app);
     }
     next();
   };
+
+  registerSnippePaymentRoutes(app, authenticate);
 
   app.get("/api/attendance-images/*", (req, res) => {
     const decoded = authenticateFromRequest(req);
@@ -985,7 +1067,18 @@ registerSnippePaymentRoutes(app);
   });
 
   app.get("/api/admin/me", authenticate, (req: any, res) => {
-    res.json({ id: req.admin.id, username: req.admin.username, role: req.admin.role, approved: req.admin.approved, is_locked: req.admin.is_locked, locked_until: req.admin.locked_until });
+    res.json({
+      id: req.admin.id,
+      username: req.admin.username,
+      role: req.admin.role,
+      approved: req.admin.approved,
+      is_locked: req.admin.is_locked,
+      locked_until: req.admin.locked_until,
+      subscription_plan: req.admin.subscription_plan,
+      subscription_status: req.admin.subscription_status,
+      subscription_expires_at: req.admin.subscription_expires_at,
+      subscription_payment_reference: req.admin.subscription_payment_reference,
+    });
   });
 
   app.post("/api/admin/logout", (_req, res) => {
@@ -1134,6 +1227,13 @@ registerSnippePaymentRoutes(app);
 
   // Create Session
   app.post("/api/sessions", authenticate, (req, res) => {
+    if (!hasActiveSubscription(req.admin)) {
+      return res.status(402).json({
+        error: "Please choose and pay for a subscription package before creating a new session.",
+        paymentRequired: true,
+      });
+    }
+
     const { name, lat, lng, radius, minutes } = req.body;
     if (
       typeof name !== "string" ||
@@ -1756,8 +1856,8 @@ const verifySnippeWebhook = async (rawPayload: string, headers: any) => {
   return received.length === computed.length && timingSafeEqual(received, computed);
 };
 
-function registerSnippePaymentRoutes(app: any) {
-app.post("/api/payments/snippe/mobile", async (req: any, res: any) => {
+function registerSnippePaymentRoutes(app: any, authenticate: any) {
+app.post("/api/payments/snippe/mobile", authenticate, async (req: any, res: any) => {
   try {
     if (!SNIPPE_API_KEY) {
       return res.status(500).json({ error: "Snippe payment is not configured on the server" });
@@ -1768,7 +1868,8 @@ app.post("/api/payments/snippe/mobile", async (req: any, res: any) => {
     const firstname = String(req.body?.firstname || req.body?.firstName || "Customer").trim();
     const lastname = String(req.body?.lastname || req.body?.lastName || "Account").trim();
     const email = String(req.body?.email || "").trim();
-    const userId = String(req.body?.userId || "").trim();
+    const planId = getSubscriptionPlan(req.body?.planId, amount);
+    const userId = String(req.admin?.id || "");
 
     if (!Number.isInteger(amount) || amount < 500) {
       return res.status(400).json({ error: "Amount must be at least 500 TZS" });
@@ -1780,6 +1881,10 @@ app.post("/api/payments/snippe/mobile", async (req: any, res: any) => {
 
     if (!email) {
       return res.status(400).json({ error: "Customer email is required" });
+    }
+
+    if (!planId) {
+      return res.status(400).json({ error: "Choose a valid subscription package" });
     }
 
     const orderId = `ATT-${Date.now().toString(36).toUpperCase()}`;
@@ -1800,9 +1905,10 @@ app.post("/api/payments/snippe/mobile", async (req: any, res: any) => {
       metadata: {
         order_id: orderId,
         user_id: userId,
+        plan_id: planId,
         source: "smart-attendance-system",
       },
-}
+    };
 
     const snippeResponse = await fetch(`${SNIPPE_API_BASE_URL}/v1/payments`, {
       method: "POST",
@@ -1834,6 +1940,7 @@ app.post("/api/payments/snippe/mobile", async (req: any, res: any) => {
         phoneNumber,
         email,
         userId,
+        planId,
         createdAt: new Date().toISOString(),
         snippe: result.data,
       });
@@ -1850,7 +1957,7 @@ app.post("/api/payments/snippe/mobile", async (req: any, res: any) => {
   }
 });
 
-app.get("/api/payments/snippe/:reference", async (req: any, res: any) => {
+app.get("/api/payments/snippe/:reference", authenticate, async (req: any, res: any) => {
   try {
     if (!SNIPPE_API_KEY) {
       return res.status(500).json({ error: "Snippe payment is not configured on the server" });
@@ -1879,6 +1986,10 @@ app.get("/api/payments/snippe/:reference", async (req: any, res: any) => {
       snippe: result.data,
     });
 
+    if (status === "completed") {
+      await activateAdminSubscription(result.data?.metadata?.user_id || req.admin?.id, result.data?.metadata?.plan_id, reference);
+    }
+
     return res.json({ payment: result.data });
   } catch (error) {
     console.error("Snippe status error:", error);
@@ -1888,7 +1999,7 @@ app.get("/api/payments/snippe/:reference", async (req: any, res: any) => {
 
 app.post("/webhooks/snippe", async (req: any, res: any) => {
   try {
-    const rawPayload = Buffer.isBuffer(req.body) ? req.body.toString("utf8") : JSON.stringify(req.body || {});
+    const rawPayload = req.rawBody || (Buffer.isBuffer(req.body) ? req.body.toString("utf8") : JSON.stringify(req.body || {}));
     const isVerified = await verifySnippeWebhook(rawPayload, req.headers);
     if (!isVerified) {
       return res.status(401).json({ error: "Invalid webhook signature" });
@@ -1919,6 +2030,10 @@ app.post("/webhooks/snippe", async (req: any, res: any) => {
         snippe: data,
         completedAt: data?.completed_at || null,
       });
+
+      if (status === "completed") {
+        await activateAdminSubscription(data?.metadata?.user_id, data?.metadata?.plan_id, reference);
+      }
     }
 
     return res.json({ received: true });

@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { startSnippeMobilePayment } from "./snippePayments";
+import { getSnippePaymentStatus, startSnippeMobilePayment } from "./snippePayments";
 
 type PricingPlan = {
   id: string;
@@ -57,12 +57,20 @@ const splitName = (fullName: string) => {
   };
 };
 
-export default function PricingSection() {
+export default function PricingSection({
+  currentAdmin,
+  onPaymentStarted,
+}: {
+  currentAdmin?: { id: number; username: string };
+  onPaymentStarted?: () => void;
+}) {
   const [selectedPlanId, setSelectedPlanId] = useState("quarterly");
   const [phoneNumber, setPhoneNumber] = useState("");
   const [customerName, setCustomerName] = useState("");
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(currentAdmin?.username || "");
   const [loadingPlanId, setLoadingPlanId] = useState<string | null>(null);
+  const [paymentReference, setPaymentReference] = useState<string | null>(null);
+  const [checkingStatus, setCheckingStatus] = useState(false);
 
   const selectedPlan = useMemo(
     () => plans.find((plan) => plan.id === selectedPlanId) || plans[1],
@@ -86,19 +94,25 @@ export default function PricingSection() {
     try {
       const result = await startSnippeMobilePayment({
         amount: plan.amount,
+        planId: plan.id,
         phoneNumber,
         firstname,
         lastname,
         email,
+        userId: currentAdmin?.id ? String(currentAdmin.id) : undefined,
       });
 
       const reference = result.payment?.reference;
+      if (reference) {
+        setPaymentReference(reference);
+      }
       window.showPrettyMessage?.(
         reference
           ? `Payment started. Check your phone and enter your PIN. Reference: ${reference}`
           : "Payment started. Check your phone and enter your PIN.",
         "success",
       );
+      onPaymentStarted?.();
     } catch (error) {
       window.showPrettyMessage?.(error instanceof Error ? error.message : "Payment failed to start.", "danger");
     } finally {
@@ -106,8 +120,26 @@ export default function PricingSection() {
     }
   };
 
+  const checkPaymentStatus = async () => {
+    if (!paymentReference) return;
+    setCheckingStatus(true);
+    try {
+      const payment = await getSnippePaymentStatus(paymentReference);
+      if (payment?.status === "completed") {
+        window.showPrettyMessage?.("Payment confirmed. Your package is active now.", "success");
+        window.setTimeout(() => window.location.reload(), 1200);
+        return;
+      }
+      window.showPrettyMessage?.(`Payment status: ${payment?.status || "pending"}.`, "info");
+    } catch (error) {
+      window.showPrettyMessage?.(error instanceof Error ? error.message : "Could not check payment status.", "danger");
+    } finally {
+      setCheckingStatus(false);
+    }
+  };
+
   return (
-    <section className="min-h-screen bg-[#0f172a] px-6 py-16 text-white">
+    <section className="bg-[#0f172a] px-6 py-12 text-white">
       <div className="mx-auto max-w-6xl">
         <div className="mb-10 text-center">
           <p className="text-sm font-bold uppercase tracking-normal text-cyan-300">Mobile Money Payment</p>
@@ -149,6 +181,22 @@ export default function PricingSection() {
             />
           </label>
         </div>
+
+        {paymentReference && (
+          <div className="mb-8 rounded-lg border border-emerald-300/40 bg-emerald-950/35 p-4">
+            <p className="text-sm text-emerald-100">
+              Payment request sent. Enter your mobile money PIN, then check status.
+            </p>
+            <button
+              type="button"
+              onClick={checkPaymentStatus}
+              disabled={checkingStatus}
+              className="mt-3 rounded-lg bg-emerald-300 px-4 py-2 text-sm font-bold text-slate-950 disabled:opacity-60"
+            >
+              {checkingStatus ? "Checking..." : "Check payment status"}
+            </button>
+          </div>
+        )}
 
         <div className="grid gap-6 md:grid-cols-3">
           {plans.map((plan) => {
