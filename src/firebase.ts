@@ -1,7 +1,6 @@
 import { initializeApp, getApps, type FirebaseApp, type FirebaseOptions } from "firebase/app";
 import { getAnalytics, isSupported, type Analytics } from "firebase/analytics";
 import {
-  OAuthProvider,
   createUserWithEmailAndPassword,
   getAuth,
   GoogleAuthProvider,
@@ -91,19 +90,6 @@ export const signInWithGoogle = async () => {
 
   const provider = new GoogleAuthProvider();
   provider.setCustomParameters({ prompt: "select_account" });
-  const credential = await signInWithPopup(services.auth, provider);
-  return credential.user.getIdToken();
-};
-
-export const signInWithApple = async () => {
-  const services = await initializeFirebase();
-  if (!services) {
-    throw new Error("Apple account login is not configured");
-  }
-
-  const provider = new OAuthProvider("apple.com");
-  provider.addScope("email");
-  provider.addScope("name");
   const credential = await signInWithPopup(services.auth, provider);
   return credential.user.getIdToken();
 };

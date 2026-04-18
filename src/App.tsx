@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { registerWithEmailPassword, sendFirebasePasswordReset, signInWithApple, signInWithEmailPassword, signInWithGoogle } from "./firebase";
+import { registerWithEmailPassword, sendFirebasePasswordReset, signInWithEmailPassword, signInWithGoogle } from "./firebase";
 import { 
   Camera, 
   MapPin, 
@@ -150,7 +150,6 @@ const AdminLogin = ({
   const [success, setSuccess] = useState("");
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
-  const [appleLoading, setAppleLoading] = useState(false);
   const [resetLoading, setResetLoading] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -227,41 +226,6 @@ const AdminLogin = ({
       );
     } finally {
       setGoogleLoading(false);
-    }
-  };
-
-  const handleAppleAccount = async () => {
-    setAppleLoading(true);
-    setError("");
-    setSuccess("");
-    try {
-      const idToken = await signInWithApple();
-      const res = await fetch("/api/admin/firebase-auth", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ idToken, mode: isSignup ? "register" : "login" }),
-      });
-      const data = await res.json().catch(() => null);
-
-      if (res.ok && isSignup) {
-        setSuccess(data?.message || "Apple account registered. Wait for Super Admin approval.");
-        setUsername("");
-        setPassword("");
-        setIsSignup(false);
-      } else if (res.ok && data?.admin) {
-        onLogin(data.admin);
-      } else {
-        setError(data?.error || (isSignup ? "Apple registration failed" : "Apple sign in failed"));
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : "";
-      setError(
-        message.includes("auth/unauthorized-domain")
-          ? "Apple sign in is blocked for this domain. Add this site to Firebase Authentication authorized domains."
-          : message || "Apple account connection failed",
-      );
-    } finally {
-      setAppleLoading(false);
     }
   };
 
@@ -373,16 +337,6 @@ const AdminLogin = ({
                 required
               />
             </div>
-            {!isSignup && (
-              <button
-                type="button"
-                onClick={handleForgotPassword}
-                disabled={loading || googleLoading || appleLoading || resetLoading}
-                className="mt-3 text-sm font-semibold text-blue-100/80 transition-colors hover:text-white disabled:opacity-50"
-              >
-                {resetLoading ? "Sending reset email..." : "Forgot password?"}
-              </button>
-            )}
           </div>
 
           {error && (
@@ -407,9 +361,26 @@ const AdminLogin = ({
             </motion.div>
           )}
 
+          {!isSignup && (
+            <div className="rounded-xl border border-white/10 bg-white/5 p-4">
+              <p className="text-sm font-semibold text-blue-100">Reset Password</p>
+              <p className="mt-1 text-xs leading-5 text-blue-100/60">
+                Enter your email above, then request a Firebase password reset email.
+              </p>
+              <button
+                type="button"
+                onClick={handleForgotPassword}
+                disabled={loading || googleLoading || resetLoading}
+                className="mt-3 w-full rounded-lg border border-blue-300/30 px-3 py-2 text-sm font-bold text-blue-50 transition-colors hover:bg-white/10 disabled:opacity-50"
+              >
+                {resetLoading ? "Sending reset email..." : "Send Reset Email"}
+              </button>
+            </div>
+          )}
+
           <button
             type="submit"
-            disabled={loading || googleLoading || appleLoading || resetLoading}
+            disabled={loading || googleLoading || resetLoading}
             className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 rounded-xl shadow-lg shadow-blue-600/30 transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50"
           >
             {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : isSignup ? "Create Account" : "Sign In"}
@@ -418,7 +389,7 @@ const AdminLogin = ({
           <button
             type="button"
             onClick={handleGoogleAccount}
-            disabled={loading || googleLoading || appleLoading || resetLoading}
+            disabled={loading || googleLoading || resetLoading}
             className="w-full rounded-xl border border-white/20 bg-white text-slate-900 py-3 font-bold shadow-lg transition-all hover:bg-blue-50 active:scale-95 disabled:opacity-50 flex items-center justify-center gap-3"
           >
             {googleLoading ? (
@@ -427,20 +398,6 @@ const AdminLogin = ({
               <span className="flex h-5 w-5 items-center justify-center rounded-full border border-slate-200 text-sm font-black text-blue-600">G</span>
             )}
             {isSignup ? "Register with Google" : "Sign in with Google"}
-          </button>
-
-          <button
-            type="button"
-            onClick={handleAppleAccount}
-            disabled={loading || googleLoading || appleLoading || resetLoading}
-            className="w-full rounded-xl border border-white/20 bg-slate-950 text-white py-3 font-bold shadow-lg transition-all hover:bg-black active:scale-95 disabled:opacity-50 flex items-center justify-center gap-3"
-          >
-            {appleLoading ? (
-              <Loader2 className="w-5 h-5 animate-spin" />
-            ) : (
-              <span className="flex h-5 w-5 items-center justify-center rounded-full border border-white/30 text-sm font-black">A</span>
-            )}
-            {isSignup ? "Register with Apple" : "Sign in with Apple"}
           </button>
 
           <button
@@ -2014,3 +1971,5 @@ export default function App() {
     />
   );
 }
+import "./apple-ui-fix.css";
+import "./pretty-popups";

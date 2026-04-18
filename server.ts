@@ -1697,3 +1697,233 @@ async function startServer() {
 }
 
 startServer();
+type SnippePaymentStatus = "pending" | "completed" | "failed" | "voided" | "expired";
+
+const SNIPPE_API_BASE_URL = "https://api.snippe.sh";
+const SNIPPE_API_KEY = process.env.SNIPPE_API_KEY || "";
+const SNIPPE_WEBHOOK_SECRET = process.env.SNIPPE_WEBHOOK_SECRET || "";
+const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "";
+
+const normalizeTanzanianPhone = (phoneNumber: unknown) => {
+  const digits = String(phoneNumber ?? "").replace(/\D/g, "");
+  if (digits.startsWith("255") && digits.length === 12) return digits;
+  if (digits.startsWith("0") && digits.length === 10) return `255${digits.slice(1)}`;
+  if (digits.length === 9) return `255${digits}`;
+  return digits;
+};
+
+const buildSnippeWebhookUrl = (req: any) => {
+  if (PUBLIC_BASE_URL) return `${PUBLIC_BASE_URL.replace(/\/$/, "")}/webhooks/snippe`;
+  const protocol = req.headers["x-forwarded-proto"] || req.protocol || "https";
+  const host = req.headers["x-forwarded-host"] || req.headers.host;
+  return `${protocol}://${host}/webhooks/snippe`;
+};
+
+const savePaymentRecord = async (reference: string, record: Record<string, unknown>) => {
+  try {
+    const adminModule = await import("firebase-admin");
+    const adminSdk: any = adminModule.default || adminModule;
+    if (!adminSdk.apps?.length) return;
+
+    await adminSdk.firestore().collection("payments").doc(reference).set(
+      {
+        ...record,
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true },
+    );
+  } catch (error) {
+    console.warn("Payment record was not saved to Firestore:", error);
+  }
+};
+
+const verifySnippeWebhook = async (rawPayload: string, headers: any) => {
+  if (!SNIPPE_WEBHOOK_SECRET) return true;
+
+  const timestamp = String(headers["x-webhook-timestamp"] || "");
+  const signature = String(headers["x-webhook-signature"] || "");
+  if (!timestamp || !signature) return false;
+
+  const eventTime = Number.parseInt(timestamp, 10);
+  const now = Math.floor(Date.now() / 1000);
+  if (!Number.isFinite(eventTime) || Math.abs(now - eventTime) > 300) return false;
+
+  const { createHmac, timingSafeEqual } = await import("node:crypto");
+  const expected = createHmac("sha256", SNIPPE_WEBHOOK_SECRET).update(`${timestamp}.${rawPayload}`).digest("hex");
+  const received = Buffer.from(signature);
+  const computed = Buffer.from(expected);
+  return received.length === computed.length && timingSafeEqual(received, computed);
+};
+
+queueMicrotask(() => {
+app.post("/api/payments/snippe/mobile", async (req: any, res: any) => {
+  try {
+    if (!SNIPPE_API_KEY) {
+      return res.status(500).json({ error: "Snippe payment is not configured on the server" });
+    }
+
+    const amount = Number(req.body?.amount);
+    const phoneNumber = normalizeTanzanianPhone(req.body?.phoneNumber);
+    const firstname = String(req.body?.firstname || req.body?.firstName || "Customer").trim();
+    const lastname = String(req.body?.lastname || req.body?.lastName || "Account").trim();
+    const email = String(req.body?.email || "").trim();
+    const userId = String(req.body?.userId || "").trim();
+
+    if (!Number.isInteger(amount) || amount < 500) {
+      return res.status(400).json({ error: "Amount must be at least 500 TZS" });
+    }
+
+    if (!/^255\d{9}$/.test(phoneNumber)) {
+      return res.status(400).json({ error: "Phone number must be a valid Tanzania number, e.g. 255712345678" });
+    }
+
+    if (!email) {
+      return res.status(400).json({ error: "Customer email is required" });
+    }
+
+    const orderId = `ATT-${Date.now().toString(36).toUpperCase()}`;
+    const idempotencyKey = orderId.slice(0, 30);
+    const payload = {
+      payment_type: "mobile",
+      details: {
+        amount,
+        currency: "TZS",
+      },
+      phone_number: phoneNumber,
+      customer: {
+        firstname,
+        lastname,
+        email,
+      },
+      webhook_url: buildSnippeWebhookUrl(req),
+      metadata: {
+        order_id: orderId,
+        user_id: userId,
+        source: "smart-attendance-system",
+      },
+    };
+
+    const snippeResponse = await fetch(`${SNIPPE_API_BASE_URL}/v1/payments`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${SNIPPE_API_KEY}`,
+        "Content-Type": "application/json",
+        "Idempotency-Key": idempotencyKey,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    const result: any = await snippeResponse.json().catch(() => ({}));
+    if (!snippeResponse.ok || result.status === "error") {
+      return res.status(snippeResponse.status || 400).json({
+        error: result.message || "Could not start mobile money payment",
+        details: result,
+      });
+    }
+
+    const reference = result.data?.reference;
+    if (reference) {
+      await savePaymentRecord(reference, {
+        provider: "snippe",
+        reference,
+        orderId,
+        status: result.data?.status || "pending",
+        amount,
+        currency: "TZS",
+        phoneNumber,
+        email,
+        userId,
+        createdAt: new Date().toISOString(),
+        snippe: result.data,
+      });
+    }
+
+    return res.status(201).json({
+      message: "Payment started. Check your phone and enter your mobile money PIN.",
+      payment: result.data,
+      orderId,
+    });
+  } catch (error) {
+    console.error("Snippe payment error:", error);
+    return res.status(500).json({ error: "Could not start mobile money payment" });
+  }
+});
+
+app.get("/api/payments/snippe/:reference", async (req: any, res: any) => {
+  try {
+    if (!SNIPPE_API_KEY) {
+      return res.status(500).json({ error: "Snippe payment is not configured on the server" });
+    }
+
+    const reference = String(req.params.reference || "");
+    const snippeResponse = await fetch(`${SNIPPE_API_BASE_URL}/v1/payments/${encodeURIComponent(reference)}`, {
+      headers: {
+        Authorization: `Bearer ${SNIPPE_API_KEY}`,
+      },
+    });
+
+    const result: any = await snippeResponse.json().catch(() => ({}));
+    if (!snippeResponse.ok || result.status === "error") {
+      return res.status(snippeResponse.status || 400).json({
+        error: result.message || "Could not check payment status",
+        details: result,
+      });
+    }
+
+    const status = (result.data?.status || "pending") as SnippePaymentStatus;
+    await savePaymentRecord(reference, {
+      provider: "snippe",
+      reference,
+      status,
+      snippe: result.data,
+    });
+
+    return res.json({ payment: result.data });
+  } catch (error) {
+    console.error("Snippe status error:", error);
+    return res.status(500).json({ error: "Could not check payment status" });
+  }
+});
+
+app.post("/webhooks/snippe", async (req: any, res: any) => {
+  try {
+    const rawPayload = Buffer.isBuffer(req.body) ? req.body.toString("utf8") : JSON.stringify(req.body || {});
+    const isVerified = await verifySnippeWebhook(rawPayload, req.headers);
+    if (!isVerified) {
+      return res.status(401).json({ error: "Invalid webhook signature" });
+    }
+
+    const event = Buffer.isBuffer(req.body) ? JSON.parse(rawPayload) : req.body;
+    const type = event?.type || event?.event;
+    const data = event?.data || event;
+    const reference = data?.reference;
+
+    if (reference) {
+      const status =
+        type === "payment.completed"
+          ? "completed"
+          : type === "payment.failed"
+            ? "failed"
+            : type === "payment.voided"
+              ? "voided"
+              : type === "payment.expired"
+                ? "expired"
+                : data?.status || "pending";
+
+      await savePaymentRecord(reference, {
+        provider: "snippe",
+        reference,
+        status,
+        webhookType: type,
+        snippe: data,
+        completedAt: data?.completed_at || null,
+      });
+    }
+
+    return res.json({ received: true });
+  } catch (error) {
+    console.error("Snippe webhook error:", error);
+    return res.status(500).json({ error: "Webhook handling failed" });
+  }
+});
+});

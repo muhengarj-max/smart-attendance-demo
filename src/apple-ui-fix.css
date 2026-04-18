@@ -1,0 +1,10 @@
+button[aria-label*="Apple"],
+button[data-provider="apple"],
+button[class*="bg-slate-950"][class*="text-white"][class*="justify-center"],
+button[class*="bg-black"][class*="text-white"],
+button[class*="bg-gray-950"][class*="text-white"],
+button[class*="bg-neutral-950"][class*="text-white"],
+button[class*="bg-zinc-950"][class*="text-white"],
+button[class*="bg-[#000"][class*="text-white"] {
+  display: none !important;
+}
