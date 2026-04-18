@@ -514,7 +514,8 @@ const fetchRemoteImageBuffer = async (imageUrl?: string | null) => {
 async function startServer() {
   await restoreFirestoreData();
 
-  const app = express();
+const app = express();
+registerSnippePaymentRoutes(app);
   // const options = {
   //   key: fs.readFileSync(path.join(__dirname, 'key.pem')),
   //   cert: fs.readFileSync(path.join(__dirname, 'cert.pem')),
@@ -1755,7 +1756,7 @@ const verifySnippeWebhook = async (rawPayload: string, headers: any) => {
   return received.length === computed.length && timingSafeEqual(received, computed);
 };
 
-queueMicrotask(() => {
+function registerSnippePaymentRoutes(app: any) {
 app.post("/api/payments/snippe/mobile", async (req: any, res: any) => {
   try {
     if (!SNIPPE_API_KEY) {
@@ -1801,7 +1802,7 @@ app.post("/api/payments/snippe/mobile", async (req: any, res: any) => {
         user_id: userId,
         source: "smart-attendance-system",
       },
-    };
+}
 
     const snippeResponse = await fetch(`${SNIPPE_API_BASE_URL}/v1/payments`, {
       method: "POST",
@@ -1926,4 +1927,4 @@ app.post("/webhooks/snippe", async (req: any, res: any) => {
     return res.status(500).json({ error: "Webhook handling failed" });
   }
 });
-});
+};
