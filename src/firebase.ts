@@ -1,6 +1,13 @@
 import { initializeApp, getApps, type FirebaseApp, type FirebaseOptions } from "firebase/app";
 import { getAnalytics, isSupported, type Analytics } from "firebase/analytics";
-import { getAuth, GoogleAuthProvider, signInWithPopup, type Auth } from "firebase/auth";
+import {
+  createUserWithEmailAndPassword,
+  getAuth,
+  GoogleAuthProvider,
+  signInWithEmailAndPassword as firebaseSignInWithEmailAndPassword,
+  signInWithPopup,
+  type Auth,
+} from "firebase/auth";
 import { getFirestore, type Firestore } from "firebase/firestore";
 import { getStorage, type FirebaseStorage } from "firebase/storage";
 
@@ -83,6 +90,26 @@ export const signInWithGoogle = async () => {
   const provider = new GoogleAuthProvider();
   provider.setCustomParameters({ prompt: "select_account" });
   const credential = await signInWithPopup(services.auth, provider);
+  return credential.user.getIdToken();
+};
+
+export const registerWithEmailPassword = async (email: string, password: string) => {
+  const services = await initializeFirebase();
+  if (!services) {
+    throw new Error("Firebase account registration is not configured");
+  }
+
+  const credential = await createUserWithEmailAndPassword(services.auth, email, password);
+  return credential.user.getIdToken();
+};
+
+export const signInWithEmailPassword = async (email: string, password: string) => {
+  const services = await initializeFirebase();
+  if (!services) {
+    throw new Error("Firebase account login is not configured");
+  }
+
+  const credential = await firebaseSignInWithEmailAndPassword(services.auth, email, password);
   return credential.user.getIdToken();
 };
 

@@ -63,6 +63,7 @@ const ADMIN_USERNAME = process.env.ADMIN_USERNAME?.trim();
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const FIREBASE_SERVICE_ACCOUNT_JSON = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
 const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || process.env.VITE_FIREBASE_PROJECT_ID;
+const FIREBASE_WEB_API_KEY = process.env.VITE_FIREBASE_API_KEY;
 const hasFirebaseAdminConfig = Boolean(FIREBASE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS || FIREBASE_PROJECT_ID);
 const hasFirestoreCredentials = Boolean(FIREBASE_SERVICE_ACCOUNT_JSON || process.env.GOOGLE_APPLICATION_CREDENTIALS);
 
@@ -189,9 +190,85 @@ const cleanFirestoreData = (row: Record<string, any>) => {
   return data;
 };
 
+const toFirestoreValue = (value: any): Record<string, any> => {
+  if (value === null || value === undefined) return { nullValue: null };
+  if (typeof value === "boolean") return { booleanValue: value };
+  if (typeof value === "number") return Number.isInteger(value) ? { integerValue: String(value) } : { doubleValue: value };
+  return { stringValue: String(value) };
+};
+
+const fromFirestoreValue = (value: any) => {
+  if (!value) return null;
+  if ("stringValue" in value) return value.stringValue;
+  if ("integerValue" in value) return Number(value.integerValue);
+  if ("doubleValue" in value) return Number(value.doubleValue);
+  if ("booleanValue" in value) return Boolean(value.booleanValue);
+  if ("nullValue" in value) return null;
+  return null;
+};
+
+const toFirestoreFields = (row: Record<string, any>) => {
+  const fields: Record<string, any> = {};
+  for (const [key, value] of Object.entries(cleanFirestoreData(row))) {
+    fields[key] = toFirestoreValue(value);
+  }
+  return fields;
+};
+
+const fromFirestoreFields = (fields: Record<string, any> = {}) => {
+  const row: Record<string, any> = {};
+  for (const [key, value] of Object.entries(fields)) {
+    row[key] = fromFirestoreValue(value);
+  }
+  return row;
+};
+
+const firestoreRestUrl = (collectionName: string, id: string) => {
+  if (!FIREBASE_PROJECT_ID) return null;
+  return `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(FIREBASE_PROJECT_ID)}/databases/(default)/documents/${collectionName}/${encodeURIComponent(id)}`;
+};
+
+const getGoogleAdminFromFirestoreRest = async (firebaseUid: string, idToken: string) => {
+  const url = firestoreRestUrl("googleAdmins", firebaseUid);
+  if (!url) return null;
+
+  const response = await fetch(url, {
+    headers: { Authorization: `Bearer ${idToken}` },
+  });
+  if (response.status === 404) return null;
+  if (!response.ok) {
+    throw new Error("Failed to read Google account from Firestore");
+  }
+
+  const data: any = await response.json();
+  return fromFirestoreFields(data.fields);
+};
+
+const saveGoogleAdminToFirestoreRest = async (firebaseUid: string, idToken: string, row: Record<string, any>) => {
+  const url = firestoreRestUrl("googleAdmins", firebaseUid);
+  if (!url) return;
+
+  const response = await fetch(url, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${idToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ fields: toFirestoreFields({ ...row, firebase_uid: firebaseUid }) }),
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(`Failed to save Google account to Firestore${text ? `: ${text}` : ""}`);
+  }
+};
+
 const mirrorToFirestore = async (collectionName: string, id: string | number | bigint, row: Record<string, any>) => {
   if (!firestoreDb) return;
   await firestoreDb.collection(collectionName).doc(String(id)).set(cleanFirestoreData(row), { merge: true });
+  if (collectionName === "admins" && row.firebase_uid) {
+    await firestoreDb.collection("googleAdmins").doc(String(row.firebase_uid)).set(cleanFirestoreData(row), { merge: true });
+  }
 };
 
 const deleteFromFirestore = async (collectionName: string, id: string | number | bigint) => {
@@ -333,6 +410,27 @@ const restoreFirestoreData = async () => {
     ...localAttendance.map((row) => mirrorToFirestore("attendance", row.id, row)),
   ]);
   console.log(`Restored Firestore data: ${adminSnapshot.size} admins, ${sessionSnapshot.size} sessions, ${attendanceSnapshot.size} attendance records.`);
+};
+
+const createLocalAdminFromGoogleFirestore = (googleAdmin: Record<string, any>) => {
+  const email = String(googleAdmin.username || googleAdmin.email || "").trim().toLowerCase();
+  const firebaseUid = String(googleAdmin.firebase_uid || "");
+  if (!email || !firebaseUid) return null;
+
+  const existing: any = db.prepare("SELECT * FROM admins WHERE firebase_uid = ? OR lower(username) = ?").get(firebaseUid, email);
+  if (existing) return existing;
+
+  const generatedPassword = bcrypt.hashSync(uuidv4(), 10);
+  const result = db.prepare("INSERT INTO admins (username, password, role, approved, is_locked, firebase_uid, auth_provider) VALUES (?, ?, ?, ?, ?, ?, 'google')")
+    .run(
+      email,
+      generatedPassword,
+      googleAdmin.role || "admin",
+      Number(googleAdmin.approved || 0),
+      Number(googleAdmin.is_locked || 0),
+      firebaseUid,
+    );
+  return db.prepare("SELECT * FROM admins WHERE id = ?").get(result.lastInsertRowid);
 };
 
 async function startServer() {
@@ -589,6 +687,115 @@ async function startServer() {
     res.json({ success: true, message: "Wait for Aproval" });
   });
 
+  app.post("/api/admin/firebase-auth", async (req, res) => {
+    const { idToken, mode } = req.body;
+    const authMode = mode === "register" ? "register" : "login";
+
+    if (!hasFirebaseAdminConfig || !getAdminApps().length) {
+      return res.status(503).json({ error: "Firebase account login is not configured on the server" });
+    }
+
+    if (typeof idToken !== "string" || !idToken.trim()) {
+      return res.status(400).json({ error: "Missing Firebase account token" });
+    }
+
+    try {
+      const decoded = await getAdminAuth().verifyIdToken(idToken);
+      const email = String(decoded.email || "").trim().toLowerCase();
+      const firebaseUid = decoded.uid;
+
+      if (!email) {
+        return res.status(403).json({ error: "Use an account with an email address" });
+      }
+
+      let admin: any = db.prepare("SELECT * FROM admins WHERE firebase_uid = ? OR lower(username) = ?").get(firebaseUid, email);
+      if (!admin) {
+        const firebaseAdmin = await getGoogleAdminFromFirestoreRest(firebaseUid, idToken).catch((err) => {
+          console.error("Failed to load Firebase admin from Firestore:", err);
+          return null;
+        });
+        if (firebaseAdmin) {
+          admin = createLocalAdminFromGoogleFirestore(firebaseAdmin);
+        }
+      }
+
+      if (authMode === "register") {
+        if (admin) {
+          if (!admin.firebase_uid) {
+            db.prepare("UPDATE admins SET firebase_uid = ?, auth_provider = 'firebase' WHERE id = ?").run(firebaseUid, admin.id);
+            admin = { ...admin, firebase_uid: firebaseUid, auth_provider: "firebase" };
+            syncAdminToFirestore(admin.id);
+          }
+          await saveGoogleAdminToFirestoreRest(firebaseUid, idToken, {
+            id: admin.id,
+            username: email,
+            email,
+            role: admin.role || "admin",
+            approved: Number(admin.approved || 0),
+            is_locked: Number(admin.is_locked || 0),
+            firebase_uid: firebaseUid,
+            auth_provider: admin.auth_provider || "firebase",
+          }).catch((err) => console.error("Failed to save Firebase admin fallback:", err));
+          return res.json({
+            success: true,
+            message: admin.approved === 1
+              ? "Account connected. You can sign in."
+              : "Account created. Wait for Super Admin approval.",
+          });
+        }
+
+        const generatedPassword = bcrypt.hashSync(uuidv4(), 10);
+        const result = db.prepare("INSERT INTO admins (username, password, role, approved, firebase_uid, auth_provider) VALUES (?, ?, 'admin', 0, ?, 'firebase')")
+          .run(email, generatedPassword, firebaseUid);
+        syncAdminToFirestore(result.lastInsertRowid);
+        await saveGoogleAdminToFirestoreRest(firebaseUid, idToken, {
+          id: Number(result.lastInsertRowid),
+          username: email,
+          email,
+          role: "admin",
+          approved: 0,
+          is_locked: 0,
+          firebase_uid: firebaseUid,
+          auth_provider: "firebase",
+        });
+        return res.json({ success: true, message: "Account created. Wait for Super Admin approval." });
+      }
+
+      if (!admin) {
+        return res.status(404).json({ error: "Account is not registered. Create account first." });
+      }
+
+      if (!admin.firebase_uid) {
+        db.prepare("UPDATE admins SET firebase_uid = ?, auth_provider = 'firebase' WHERE id = ?").run(firebaseUid, admin.id);
+        admin = { ...admin, firebase_uid: firebaseUid, auth_provider: "firebase" };
+        syncAdminToFirestore(admin.id);
+      }
+
+      if (admin.is_locked === 1) {
+        return res.status(423).json({ error: "Account is temporarily locked", lockedUntil: admin.locked_until });
+      }
+      if (admin.approved !== 1) {
+        return res.status(403).json({ error: "Account not yet approved. Please contact 0694 128 543" });
+      }
+
+      const token = jwt.sign({ id: admin.id, username: admin.username, role: admin.role }, JWT_SECRET, { expiresIn: "10m" });
+      setAuthCookie(res, token);
+      return res.json({
+        token,
+        admin: {
+          id: admin.id,
+          username: admin.username,
+          role: admin.role,
+          approved: admin.approved,
+          is_locked: admin.is_locked,
+          locked_until: admin.locked_until,
+        },
+      });
+    } catch (err) {
+      return res.status(401).json({ error: "Firebase account verification failed" });
+    }
+  });
+
   app.post("/api/admin/google-auth", async (req, res) => {
     const { idToken, mode } = req.body;
     const authMode = mode === "register" ? "register" : "login";
@@ -611,6 +818,15 @@ async function startServer() {
       }
 
       let admin: any = db.prepare("SELECT * FROM admins WHERE firebase_uid = ? OR lower(username) = ?").get(firebaseUid, email);
+      if (!admin) {
+        const googleAdmin = await getGoogleAdminFromFirestoreRest(firebaseUid, idToken).catch((err) => {
+          console.error("Failed to load Google admin from Firestore:", err);
+          return null;
+        });
+        if (googleAdmin) {
+          admin = createLocalAdminFromGoogleFirestore(googleAdmin);
+        }
+      }
 
       if (authMode === "register") {
         if (admin) {
@@ -619,6 +835,16 @@ async function startServer() {
             admin = { ...admin, firebase_uid: firebaseUid, auth_provider: "google" };
             syncAdminToFirestore(admin.id);
           }
+          await saveGoogleAdminToFirestoreRest(firebaseUid, idToken, {
+            id: admin.id,
+            username: email,
+            email,
+            role: admin.role || "admin",
+            approved: Number(admin.approved || 0),
+            is_locked: Number(admin.is_locked || 0),
+            firebase_uid: firebaseUid,
+            auth_provider: "google",
+          }).catch((err) => console.error("Failed to save Google admin fallback:", err));
           return res.json({
             success: true,
             message: admin.approved === 1
@@ -631,6 +857,16 @@ async function startServer() {
         const result = db.prepare("INSERT INTO admins (username, password, role, approved, firebase_uid, auth_provider) VALUES (?, ?, 'admin', 0, ?, 'google')")
           .run(email, generatedPassword, firebaseUid);
         syncAdminToFirestore(result.lastInsertRowid);
+        await saveGoogleAdminToFirestoreRest(firebaseUid, idToken, {
+          id: Number(result.lastInsertRowid),
+          username: email,
+          email,
+          role: "admin",
+          approved: 0,
+          is_locked: 0,
+          firebase_uid: firebaseUid,
+          auth_provider: "google",
+        });
         return res.json({ success: true, message: "Google account registered. Wait for Super Admin approval." });
       }
 

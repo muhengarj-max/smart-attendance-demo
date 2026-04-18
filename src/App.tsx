@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { signInWithGoogle } from "./firebase";
+import { registerWithEmailPassword, signInWithEmailPassword, signInWithGoogle } from "./firebase";
 import { 
   Camera, 
   MapPin, 
@@ -157,24 +157,35 @@ const AdminLogin = ({
     setError("");
     setSuccess("");
     try {
-      const res = await fetch(isSignup ? "/api/admin/register" : "/api/admin/login", {
+      const email = username.trim().toLowerCase();
+      const idToken = isSignup
+        ? await registerWithEmailPassword(email, password)
+        : await signInWithEmailPassword(email, password);
+      const res = await fetch("/api/admin/firebase-auth", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ idToken, mode: isSignup ? "register" : "login" }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => null);
       if (res.ok && isSignup) {
-        setSuccess(data.message || "Wait for Aproval");
+        setSuccess(data?.message || "Wait for Approval");
         setUsername("");
         setPassword("");
         setIsSignup(false);
-      } else if (res.ok) {
+      } else if (res.ok && data?.admin) {
         onLogin(data.admin);
       } else {
-        setError(data.error || (isSignup ? "Signup failed" : "Login failed"));
+        setError(data?.error || (isSignup ? "Signup failed" : "Login failed"));
       }
     } catch (err) {
-      setError("Cannot reach the server. Start the app with npm run dev or npm start.");
+      const message = err instanceof Error ? err.message : "";
+      setError(
+        message.includes("auth/email-already-in-use")
+          ? "This email already has an account. Sign in instead."
+          : message.includes("auth/invalid-credential")
+            ? "Invalid email or password."
+            : message || "Cannot reach the server. Start the app with npm run dev or npm start.",
+      );
     } finally {
       setLoading(false);
     }
@@ -266,15 +277,15 @@ const AdminLogin = ({
 
         <form onSubmit={handleSubmit} className="space-y-6">
           <div>
-            <label className="block text-sm font-medium text-blue-100 mb-2">Username</label>
+            <label className="block text-sm font-medium text-blue-100 mb-2">Email</label>
             <div className="relative">
               <User className="absolute left-3 top-1/2 -translate-y-1/2 text-blue-300 w-5 h-5" />
               <input
-                type="text"
+                type="email"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 className="w-full bg-white/5 border border-white/10 rounded-xl py-3 pl-10 pr-4 text-white placeholder-blue-300/30 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
-                placeholder="Enter username"
+                placeholder="Enter email"
                 required
               />
             </div>
