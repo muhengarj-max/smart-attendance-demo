@@ -1,6 +1,17 @@
 <!doctype html>
 <html lang="en">
-  <head>
+<head>
+    <style>
+      button[aria-label*="Apple"],
+      button[data-provider="apple"],
+      button[class*="bg-black"][class*="text-white"],
+      button[class*="bg-slate-950"][class*="text-white"],
+      button[class*="bg-gray-950"][class*="text-white"],
+      button[class*="bg-neutral-950"][class*="text-white"],
+      button[class*="bg-zinc-950"][class*="text-white"] {
+        display: none !important;
+      }
+    </style>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Smart Attendance System</title>
@@ -10,4 +21,3 @@
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
-
