@@ -5,6 +5,7 @@ import {
   createUserWithEmailAndPassword,
   getAuth,
   GoogleAuthProvider,
+  sendPasswordResetEmail,
   signInWithEmailAndPassword as firebaseSignInWithEmailAndPassword,
   signInWithPopup,
   type Auth,
@@ -125,6 +126,15 @@ export const signInWithEmailPassword = async (email: string, password: string) =
 
   const credential = await firebaseSignInWithEmailAndPassword(services.auth, email, password);
   return credential.user.getIdToken();
+};
+
+export const sendFirebasePasswordReset = async (email: string) => {
+  const services = await initializeFirebase();
+  if (!services) {
+    throw new Error("Password reset is not configured");
+  }
+
+  await sendPasswordResetEmail(services.auth, email);
 };
 
 export const firebaseAnalytics = initializeFirebase().then((services) => services?.analytics ?? null);

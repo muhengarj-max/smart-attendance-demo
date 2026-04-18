@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { motion, AnimatePresence } from "motion/react";
-import { registerWithEmailPassword, signInWithApple, signInWithEmailPassword, signInWithGoogle } from "./firebase";
+import { registerWithEmailPassword, sendFirebasePasswordReset, signInWithApple, signInWithEmailPassword, signInWithGoogle } from "./firebase";
 import { 
   Camera, 
   MapPin, 
@@ -151,6 +151,7 @@ const AdminLogin = ({
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
   const [appleLoading, setAppleLoading] = useState(false);
+  const [resetLoading, setResetLoading] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -185,7 +186,9 @@ const AdminLogin = ({
           ? "This email already has an account. Sign in instead."
           : message.includes("auth/invalid-credential")
             ? "Invalid email or password."
-            : message || "Cannot reach the server. Start the app with npm run dev or npm start.",
+            : message.includes("auth/operation-not-allowed")
+              ? "Email and password sign in is disabled in Firebase. Enable the Email/Password provider in Firebase Authentication."
+              : message || "Cannot reach the server. Start the app with npm run dev or npm start.",
       );
     } finally {
       setLoading(false);
@@ -259,6 +262,36 @@ const AdminLogin = ({
       );
     } finally {
       setAppleLoading(false);
+    }
+  };
+
+  const handleForgotPassword = async () => {
+    const email = username.trim().toLowerCase();
+    if (!email) {
+      setError("Enter your email first, then request a password reset.");
+      setSuccess("");
+      return;
+    }
+
+    setResetLoading(true);
+    setError("");
+    setSuccess("");
+    try {
+      await sendFirebasePasswordReset(email);
+      setSuccess("Password reset email sent. Check your inbox and follow the Firebase link.");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "";
+      setError(
+        message.includes("auth/user-not-found")
+          ? "No account was found for that email."
+          : message.includes("auth/invalid-email")
+            ? "Enter a valid email address."
+            : message.includes("auth/operation-not-allowed")
+              ? "Password reset is disabled because Email/Password sign in is not enabled in Firebase."
+              : message || "Failed to send password reset email.",
+      );
+    } finally {
+      setResetLoading(false);
     }
   };
 
@@ -340,6 +373,16 @@ const AdminLogin = ({
                 required
               />
             </div>
+            {!isSignup && (
+              <button
+                type="button"
+                onClick={handleForgotPassword}
+                disabled={loading || googleLoading || appleLoading || resetLoading}
+                className="mt-3 text-sm font-semibold text-blue-100/80 transition-colors hover:text-white disabled:opacity-50"
+              >
+                {resetLoading ? "Sending reset email..." : "Forgot password?"}
+              </button>
+            )}
           </div>
 
           {error && (
@@ -366,7 +409,7 @@ const AdminLogin = ({
 
           <button
             type="submit"
-            disabled={loading || googleLoading || appleLoading}
+            disabled={loading || googleLoading || appleLoading || resetLoading}
             className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 rounded-xl shadow-lg shadow-blue-600/30 transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50"
           >
             {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : isSignup ? "Create Account" : "Sign In"}
@@ -375,7 +418,7 @@ const AdminLogin = ({
           <button
             type="button"
             onClick={handleGoogleAccount}
-            disabled={loading || googleLoading || appleLoading}
+            disabled={loading || googleLoading || appleLoading || resetLoading}
             className="w-full rounded-xl border border-white/20 bg-white text-slate-900 py-3 font-bold shadow-lg transition-all hover:bg-blue-50 active:scale-95 disabled:opacity-50 flex items-center justify-center gap-3"
           >
             {googleLoading ? (
@@ -389,7 +432,7 @@ const AdminLogin = ({
           <button
             type="button"
             onClick={handleAppleAccount}
-            disabled={loading || googleLoading || appleLoading}
+            disabled={loading || googleLoading || appleLoading || resetLoading}
             className="w-full rounded-xl border border-white/20 bg-slate-950 text-white py-3 font-bold shadow-lg transition-all hover:bg-black active:scale-95 disabled:opacity-50 flex items-center justify-center gap-3"
           >
             {appleLoading ? (

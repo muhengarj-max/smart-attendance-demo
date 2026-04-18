@@ -19,6 +19,7 @@ export default defineConfig(({mode}) => {
       // Only build the frontend, not server.ts
       outDir: 'dist',
       emptyOutDir: true,
+      chunkSizeWarningLimit: 1200,
     },
     server: {
       // HMR is disabled via DISABLE_HMR env var.
