@@ -11,7 +11,6 @@ import {
   CheckCircle2, 
   AlertCircle, 
   Loader2, 
-  LayoutDashboard, 
   LogOut, 
   Plus, 
   Download, 
@@ -73,6 +72,8 @@ interface AdminUser {
   locked_until?: string | null;
   created_at: string;
 }
+
+const smartAttendanceLogo = "/landing/logo.png";
 
 const AppFooter = () => {
   const currentYear = new Date().getFullYear();
@@ -356,9 +357,11 @@ const AdminLogin = ({
         className="bg-white/10 backdrop-blur-xl p-8 rounded-3xl shadow-2xl w-full max-w-md border border-white/20"
       >
         <div className="text-center mb-8">
-          <div className="bg-blue-500 w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg shadow-blue-500/50">
-            <LayoutDashboard className="text-white w-8 h-8" />
-          </div>
+          <img
+            src={smartAttendanceLogo}
+            alt="Smart Attendance logo"
+            className="mx-auto mb-4 h-28 w-28 rounded-2xl bg-white object-contain p-2 shadow-lg shadow-blue-500/30"
+          />
           <h1 className="text-3xl font-bold text-white mb-2">Admin Portal</h1>
           <p className="text-blue-200/60">{isSignup ? "Create account and sign in to Smart Attendance" : "Secure access to Smart Attendance"}</p>
         </div>
@@ -893,11 +896,13 @@ const AdminDashboard = ({
     <div className="min-h-screen bg-slate-50">
       {/* Sidebar / Header */}
       <header className="bg-white border-b border-slate-200 sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-4 h-16 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="bg-blue-600 p-1.5 rounded-lg">
-              <LayoutDashboard className="text-white w-5 h-5" />
-            </div>
+        <div className="max-w-7xl mx-auto px-4 min-h-20 py-2 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <img
+              src={smartAttendanceLogo}
+              alt="Smart Attendance logo"
+              className="h-14 w-14 rounded-lg bg-white object-contain p-1 shadow-sm ring-1 ring-slate-200"
+            />
             <div className="hidden sm:block">
               <h1 className="text-xl font-bold text-slate-900 hidden sm:block">Smart Attendance</h1>
             </div>

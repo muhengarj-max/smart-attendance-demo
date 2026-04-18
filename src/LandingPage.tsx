@@ -13,16 +13,31 @@ import {
   Zap,
   type LucideIcon,
 } from "lucide-react";
-import adminDashboardImage from "./assets/landing-admin-dashboard.svg";
-import gpsVerificationImage from "./assets/landing-gps-verification.svg";
-import onlineAttendanceImage from "./assets/landing-online-attendance.svg";
-import studentStepsImage from "./assets/landing-student-steps.svg";
-import smartAttendanceLogo from "./assets/smart-attendance-logo.svg";
+import type { SyntheticEvent } from "react";
+import adminDashboardFallback from "./assets/landing-admin-dashboard.svg";
+import gpsVerificationFallback from "./assets/landing-gps-verification.svg";
+import onlineAttendanceFallback from "./assets/landing-online-attendance.svg";
+import studentStepsFallback from "./assets/landing-student-steps.svg";
 
-const heroImage = onlineAttendanceImage;
-const classroomImage = adminDashboardImage;
-const studentImage = studentStepsImage;
-const gpsImage = gpsVerificationImage;
+const landingImages = {
+  logo: "/landing/logo.png",
+  hero: "/landing/online-attendance.png",
+  gps: "/landing/gps-verification.png",
+  dashboard: "/landing/admin-dashboard.png",
+  steps: "/landing/student-steps.png",
+};
+
+const fallbackImages = {
+  hero: onlineAttendanceFallback,
+  gps: gpsVerificationFallback,
+  dashboard: adminDashboardFallback,
+  steps: studentStepsFallback,
+};
+
+const useFallbackImage = (fallback: string) => (event: SyntheticEvent<HTMLImageElement>) => {
+  event.currentTarget.onerror = null;
+  event.currentTarget.src = fallback;
+};
 
 const stats = [
   { label: "Institutions", value: "1,000+" },
@@ -58,17 +73,20 @@ const steps = [
   {
     title: "Create Session",
     desc: "The lecturer creates an attendance session with time, link, and location settings.",
-    image: gpsImage,
+    image: landingImages.gps,
+    fallback: fallbackImages.gps,
   },
   {
     title: "Students Submit Online",
     desc: "Students open the link, capture a live selfie, verify location, and submit attendance.",
-    image: studentImage,
+    image: landingImages.steps,
+    fallback: fallbackImages.steps,
   },
   {
     title: "Track and Export Records",
     desc: "Attendance is stored securely and can be reviewed or exported as Excel and PDF reports.",
-    image: classroomImage,
+    image: landingImages.dashboard,
+    fallback: fallbackImages.dashboard,
   },
 ];
 
@@ -178,7 +196,7 @@ export default function LandingPage() {
       <header className="relative z-20">
         <nav className="mx-auto flex max-w-7xl items-center justify-between px-6 py-5 lg:px-8">
           <a href="/" className="flex items-center gap-3">
-            <img src={smartAttendanceLogo} alt="Smart Attendance logo" className="h-14 w-14 rounded-lg bg-white object-contain p-1" />
+            <img src={landingImages.logo} alt="Smart Attendance logo" className="h-20 w-20 rounded-lg bg-white object-contain p-1.5" />
             <div>
               <h1 className="text-xl font-bold tracking-normal">Smart Attendance</h1>
               <p className="text-xs text-slate-300">Premium Digital Attendance Platform</p>
@@ -243,36 +261,29 @@ export default function LandingPage() {
           <div className="relative rounded-lg border border-white/10 bg-white/8 p-5 shadow-[0_30px_90px_rgba(0,0,0,0.35)] backdrop-blur-2xl">
             <div className="rounded-lg border border-white/10 bg-slate-900/85 p-5">
               <div className="grid gap-4">
-                <div className="relative min-h-[340px] overflow-hidden rounded-lg border border-white/10 bg-gradient-to-br from-slate-800 to-slate-900 p-6">
-                  <img src={heroImage} alt="African students using smartphones in class" className="absolute inset-0 h-full w-full object-cover opacity-45" />
-                  <div className="absolute inset-0 bg-slate-950/50" />
-                  <div className="relative flex h-full min-h-[292px] flex-col justify-between">
-                    <div className="max-w-lg">
-                      <p className="text-sm font-semibold text-cyan-300">Premium Attendance Experience</p>
-                      <h3 className="mt-3 text-3xl font-black leading-tight">
-                        Students Submit Attendance Online In Class
-                      </h3>
-                      <p className="mt-4 text-sm leading-7 text-slate-300">
-                        Students use their phones to verify attendance with a live selfie and location confirmation while lecturers monitor submissions from a professional admin dashboard.
-                      </p>
-                    </div>
+                <div className="overflow-hidden rounded-lg border border-white/10 bg-slate-900">
+                  <img
+                    src={landingImages.hero}
+                    alt="African students using smartphones in class"
+                    className="w-full object-cover"
+                    onError={useFallbackImage(fallbackImages.hero)}
+                  />
+                </div>
 
-                    <div className="mt-6 grid gap-4 sm:grid-cols-3">
-                      {[
-                        { icon: Smartphone, label: "Mobile Check-In" },
-                        { icon: Camera, label: "Live Selfie" },
-                        { icon: MapPin, label: "GPS Verified" },
-                      ].map((item) => {
-                        const Icon = item.icon;
-                        return (
-                          <div key={item.label} className="rounded-lg border border-white/10 bg-white/8 p-4 backdrop-blur-xl">
-                            <Icon className="mb-3 h-5 w-5 text-cyan-300" />
-                            <p className="text-sm font-semibold">{item.label}</p>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </div>
+                <div className="grid gap-4 sm:grid-cols-3">
+                  {[
+                    { icon: Smartphone, label: "Mobile Check-In" },
+                    { icon: Camera, label: "Live Selfie" },
+                    { icon: MapPin, label: "GPS Verified" },
+                  ].map((item) => {
+                    const Icon = item.icon;
+                    return (
+                      <div key={item.label} className="rounded-lg border border-white/10 bg-white/8 p-4 backdrop-blur-xl">
+                        <Icon className="mb-3 h-5 w-5 text-cyan-300" />
+                        <p className="text-sm font-semibold">{item.label}</p>
+                      </div>
+                    );
+                  })}
                 </div>
 
                 <div className="grid gap-4 md:grid-cols-3">
@@ -331,7 +342,12 @@ export default function LandingPage() {
           <div className="mt-14 grid gap-6 md:grid-cols-3">
             {steps.map((step, i) => (
               <div key={step.title} className="relative overflow-hidden rounded-lg border border-white/10 bg-slate-950/40">
-                <img src={step.image} alt={step.title} className="h-44 w-full object-cover opacity-85" />
+                <img
+                  src={step.image}
+                  alt={step.title}
+                  className="h-44 w-full object-cover opacity-85"
+                  onError={useFallbackImage(step.fallback)}
+                />
                 <div className="p-7">
                   <div className="mb-5 flex h-12 w-12 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-cyan-400 font-black text-white">
                     {i + 1}
@@ -415,7 +431,7 @@ export default function LandingPage() {
         <div className="mx-auto grid max-w-7xl gap-10 px-6 py-12 lg:grid-cols-2 lg:px-8">
           <div>
             <div className="flex items-center gap-3">
-              <img src={smartAttendanceLogo} alt="Smart Attendance logo" className="h-14 w-14 rounded-lg bg-white object-contain p-1" />
+              <img src={landingImages.logo} alt="Smart Attendance logo" className="h-24 w-24 rounded-lg bg-white object-contain p-2" />
               <div>
                 <h4 className="text-xl font-bold">Smart Attendance</h4>
                 <p className="text-sm text-slate-300">A premium digital attendance solution for modern institutions.</p>
