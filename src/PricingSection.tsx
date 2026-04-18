@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { getSnippePaymentStatus, startSnippeMobilePayment } from "./snippePayments";
 
 type PricingPlan = {
@@ -137,6 +137,37 @@ export default function PricingSection({
       setCheckingStatus(false);
     }
   };
+
+  useEffect(() => {
+    if (!paymentReference) return;
+
+    let attempts = 0;
+    const timer = window.setInterval(async () => {
+      attempts += 1;
+      try {
+        const payment = await getSnippePaymentStatus(paymentReference);
+        if (payment?.status === "completed") {
+          window.clearInterval(timer);
+          window.showPrettyMessage?.("Payment confirmed. Your package is active now.", "success");
+          window.setTimeout(() => window.location.reload(), 1200);
+        }
+        if (["failed", "voided", "expired"].includes(payment?.status)) {
+          window.clearInterval(timer);
+          window.showPrettyMessage?.(`Payment ${payment.status}. Please try again.`, "danger");
+        }
+      } catch {
+        if (attempts >= 24) {
+          window.clearInterval(timer);
+        }
+      }
+
+      if (attempts >= 24) {
+        window.clearInterval(timer);
+      }
+    }, 5000);
+
+    return () => window.clearInterval(timer);
+  }, [paymentReference]);
 
   return (
     <section className="bg-[#0f172a] px-6 py-12 text-white">

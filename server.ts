@@ -46,6 +46,9 @@ type AdminRow = {
   subscription_status?: string | null;
   subscription_expires_at?: string | null;
   subscription_payment_reference?: string | null;
+  trial_session_used?: number;
+  trial_session_id?: string | null;
+  trial_started_at?: string | null;
 };
 
 declare global {
@@ -172,6 +175,9 @@ ensureColumn("admins", "subscription_status", "TEXT NOT NULL DEFAULT 'inactive'"
 ensureColumn("admins", "subscription_started_at", "DATETIME");
 ensureColumn("admins", "subscription_expires_at", "DATETIME");
 ensureColumn("admins", "subscription_payment_reference", "TEXT");
+ensureColumn("admins", "trial_session_used", "INTEGER NOT NULL DEFAULT 0");
+ensureColumn("admins", "trial_session_id", "TEXT");
+ensureColumn("admins", "trial_started_at", "DATETIME");
 ensureColumn("sessions", "created_by_admin_id", "INTEGER");
 ensureColumn("sessions", "deleted_at", "DATETIME");
 db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_admins_firebase_uid ON admins(firebase_uid) WHERE firebase_uid IS NOT NULL");
@@ -379,6 +385,26 @@ const hasActiveSubscription = (admin: Pick<AdminRow, "role" | "subscription_stat
   return new Date(admin.subscription_expires_at).getTime() > Date.now();
 };
 
+const canUseFreeTrialSession = (admin: Pick<AdminRow, "role" | "trial_session_used">) => {
+  if (admin.role === "super_admin") return false;
+  return Number(admin.trial_session_used || 0) !== 1;
+};
+
+const expireAdminSubscriptionIfNeeded = (admin: AdminRow) => {
+  if (admin.role === "super_admin") return admin;
+  if (admin.subscription_status !== "active" || !admin.subscription_expires_at) return admin;
+
+  const expiryTime = new Date(admin.subscription_expires_at).getTime();
+  if (!Number.isFinite(expiryTime) || expiryTime > Date.now()) return admin;
+
+  db.prepare("UPDATE admins SET subscription_status = 'expired' WHERE id = ?").run(admin.id);
+  syncAdminToFirestore(admin.id);
+  return {
+    ...admin,
+    subscription_status: "expired",
+  };
+};
+
 const activateAdminSubscription = async (adminId: unknown, planId: unknown, reference: string) => {
   const id = Number(adminId);
   if (!Number.isInteger(id)) return false;
@@ -421,8 +447,8 @@ const restoreFirestoreData = async () => {
   ]);
 
   const upsertAdmin = db.prepare(`
-    INSERT INTO admins (id, username, password, role, approved, is_locked, locked_until, created_at, firebase_uid, auth_provider, subscription_plan, subscription_status, subscription_started_at, subscription_expires_at, subscription_payment_reference)
-    VALUES (@id, @username, @password, @role, @approved, @is_locked, @locked_until, @created_at, @firebase_uid, @auth_provider, @subscription_plan, @subscription_status, @subscription_started_at, @subscription_expires_at, @subscription_payment_reference)
+    INSERT INTO admins (id, username, password, role, approved, is_locked, locked_until, created_at, firebase_uid, auth_provider, subscription_plan, subscription_status, subscription_started_at, subscription_expires_at, subscription_payment_reference, trial_session_used, trial_session_id, trial_started_at)
+    VALUES (@id, @username, @password, @role, @approved, @is_locked, @locked_until, @created_at, @firebase_uid, @auth_provider, @subscription_plan, @subscription_status, @subscription_started_at, @subscription_expires_at, @subscription_payment_reference, @trial_session_used, @trial_session_id, @trial_started_at)
     ON CONFLICT(id) DO UPDATE SET
       username = excluded.username,
       password = excluded.password,
@@ -437,7 +463,10 @@ const restoreFirestoreData = async () => {
       subscription_status = excluded.subscription_status,
       subscription_started_at = excluded.subscription_started_at,
       subscription_expires_at = excluded.subscription_expires_at,
-      subscription_payment_reference = excluded.subscription_payment_reference
+      subscription_payment_reference = excluded.subscription_payment_reference,
+      trial_session_used = excluded.trial_session_used,
+      trial_session_id = excluded.trial_session_id,
+      trial_started_at = excluded.trial_started_at
   `);
   const upsertSession = db.prepare(`
     INSERT INTO sessions (id, name, created_by_admin_id, lat, lng, radius, expires_at, is_active, deleted_at, created_at)
@@ -486,6 +515,9 @@ const restoreFirestoreData = async () => {
         subscription_started_at: data.subscription_started_at || null,
         subscription_expires_at: data.subscription_expires_at || null,
         subscription_payment_reference: data.subscription_payment_reference || null,
+        trial_session_used: Number(data.trial_session_used || 0),
+        trial_session_id: data.trial_session_id || null,
+        trial_started_at: data.trial_started_at || null,
       });
     }
 
@@ -729,7 +761,7 @@ const app = express();
       res.status(401).json({ error: "Invalid token" });
       return;
     }
-    const admin: any = db.prepare("SELECT id, username, role, approved, is_locked, locked_until, subscription_plan, subscription_status, subscription_expires_at, subscription_payment_reference FROM admins WHERE id = ?").get((decoded as any).id);
+    let admin: any = db.prepare("SELECT id, username, role, approved, is_locked, locked_until, subscription_plan, subscription_status, subscription_expires_at, subscription_payment_reference, trial_session_used, trial_session_id, trial_started_at FROM admins WHERE id = ?").get((decoded as any).id);
     if (!admin) {
       res.status(401).json({ error: "Admin account not found" });
       return;
@@ -745,6 +777,7 @@ const app = express();
       res.status(403).json({ error: "Account not yet approved. Please contact 0694 128 543" });
       return;
     }
+    admin = expireAdminSubscriptionIfNeeded(admin);
     req.admin = admin;
     next();
   };
@@ -1078,6 +1111,9 @@ const app = express();
       subscription_status: req.admin.subscription_status,
       subscription_expires_at: req.admin.subscription_expires_at,
       subscription_payment_reference: req.admin.subscription_payment_reference,
+      trial_session_used: req.admin.trial_session_used,
+      trial_session_id: req.admin.trial_session_id,
+      trial_started_at: req.admin.trial_started_at,
     });
   });
 
@@ -1227,9 +1263,11 @@ const app = express();
 
   // Create Session
   app.post("/api/sessions", authenticate, (req, res) => {
-    if (!hasActiveSubscription(req.admin)) {
+    const hasPaidAccess = hasActiveSubscription(req.admin);
+    const hasTrialAccess = canUseFreeTrialSession(req.admin);
+    if (!hasPaidAccess && !hasTrialAccess) {
       return res.status(402).json({
-        error: "Please choose and pay for a subscription package before creating a new session.",
+        error: "Your free trial session has already been used. Please choose and pay for a subscription package before creating a new session.",
         paymentRequired: true,
       });
     }
@@ -1259,7 +1297,12 @@ const app = express();
     db.prepare("INSERT INTO sessions (id, name, created_by_admin_id, lat, lng, radius, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
       .run(id, name.trim(), req.admin.id, lat, lng, radius / 1000, expiresAt); // radius in km
     syncSessionToFirestore(id);
-    res.json({ id });
+    if (!hasPaidAccess && hasTrialAccess) {
+      db.prepare("UPDATE admins SET trial_session_used = 1, trial_session_id = ?, trial_started_at = ? WHERE id = ?")
+        .run(id, new Date().toISOString(), req.admin.id);
+      syncAdminToFirestore(req.admin.id);
+    }
+    res.json({ id, trialUsed: !hasPaidAccess && hasTrialAccess });
   });
 
   // Delete Session

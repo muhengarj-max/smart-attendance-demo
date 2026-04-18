@@ -55,6 +55,9 @@ interface CurrentAdmin {
   subscription_status?: string | null;
   subscription_expires_at?: string | null;
   subscription_payment_reference?: string | null;
+  trial_session_used?: number;
+  trial_session_id?: string | null;
+  trial_started_at?: string | null;
 }
 
 interface AdminUser {
@@ -452,11 +455,14 @@ const AdminDashboard = ({
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [totalRecords, setTotalRecords] = useState(0);
+  const [trialUsedOverride, setTrialUsedOverride] = useState(false);
   const hasActiveSubscription =
     currentAdmin.role === "super_admin" ||
     (currentAdmin.subscription_status === "active" &&
       Boolean(currentAdmin.subscription_expires_at) &&
       new Date(currentAdmin.subscription_expires_at as string).getTime() > Date.now());
+  const canUseFreeTrial = currentAdmin.role !== "super_admin" && currentAdmin.trial_session_used !== 1 && !trialUsedOverride;
+  const canCreateSession = hasActiveSubscription || canUseFreeTrial;
 
   const fetchAdmins = async () => {
     if (currentAdmin.role !== "super_admin") {
@@ -606,6 +612,10 @@ const AdminDashboard = ({
         const data = await res.json();
         setShowCreate(false);
         setCreatedSessionId(data.id);
+        if (data.trialUsed) {
+          setTrialUsedOverride(true);
+          window.showPrettyMessage?.("Free trial session created. Choose a package to create more sessions.", "success");
+        }
         setPage(1);
         fetchData(selectedSession?.id, 1);
       } else {
@@ -816,8 +826,8 @@ const AdminDashboard = ({
             </div>
             <button 
               onClick={() => {
-                if (!hasActiveSubscription) {
-                  window.showPrettyMessage?.("Choose and pay for a package before creating a new session.", "warning");
+                if (!canCreateSession) {
+                  window.showPrettyMessage?.("Your free trial session is used. Choose and pay for a package before creating a new session.", "warning");
                   return;
                 }
                 setShowCreate(true);
@@ -841,10 +851,16 @@ const AdminDashboard = ({
         {!hasActiveSubscription && (
           <div className="mb-6 overflow-hidden rounded-lg border border-amber-200 bg-white shadow-sm">
             <div className="border-b border-amber-100 bg-amber-50 px-5 py-4">
-              <p className="text-xs font-bold uppercase tracking-normal text-amber-700">Payment Required</p>
-              <h2 className="mt-1 text-xl font-bold text-slate-900">Choose a package to create sessions</h2>
+              <p className="text-xs font-bold uppercase tracking-normal text-amber-700">
+                {canUseFreeTrial ? "Free Trial Available" : "Payment Required"}
+              </p>
+              <h2 className="mt-1 text-xl font-bold text-slate-900">
+                {canUseFreeTrial ? "Create one session free, then choose a package" : "Choose a package to create sessions"}
+              </h2>
               <p className="mt-1 text-sm text-slate-600">
-                Your account is approved, but attendance sessions are available after an active subscription.
+                {canUseFreeTrial
+                  ? "New users can create one attendance session without payment. After that, a subscription is required."
+                  : "Your free trial session has already been used. Attendance sessions are available after an active subscription."}
               </p>
             </div>
             <PricingSection currentAdmin={currentAdmin} onPaymentStarted={() => fetch("/api/admin/me", { credentials: "include" }).then((res) => res.ok ? res.json() : null).then(() => undefined)} />
