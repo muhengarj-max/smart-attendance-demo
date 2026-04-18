@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 360" role="img" aria-labelledby="title desc">
+  <title id="title">Smart Attendance logo</title>
+  <desc id="desc">Shield, fingerprint, ID card, and check mark logo for Smart Attendance.</desc>
+  <defs>
+    <linearGradient id="blue" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#08c4dc"/>
+      <stop offset="1" stop-color="#063ea2"/>
+    </linearGradient>
+    <linearGradient id="green" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#78d60b"/>
+      <stop offset="1" stop-color="#2f9a12"/>
+    </linearGradient>
+  </defs>
+  <rect width="720" height="360" fill="white"/>
+  <g transform="translate(165 20)">
+    <path d="M195 22c54 36 106 52 174 52v94c0 88-58 145-174 177C79 313 21 256 21 168V74c68 0 120-16 174-52Z" fill="url(#blue)"/>
+    <path d="M195 46c45 29 91 44 149 47v72c0 70-45 117-149 147C91 282 45 235 45 165V93c59-3 105-18 150-47Z" fill="none" stroke="#19d3f4" stroke-width="10" opacity=".75"/>
+    <path d="M-2 80c-45 20-76 63-76 113 0 67 55 122 123 122" fill="none" stroke="#52b719" stroke-width="10" stroke-linecap="round"/>
+    <path d="M0 118c-27 14-45 42-45 75 0 48 39 87 87 87" fill="none" stroke="#52b719" stroke-width="10" stroke-linecap="round"/>
+    <path d="M1 154c-9 10-15 24-15 39 0 31 25 56 56 56" fill="none" stroke="#52b719" stroke-width="10" stroke-linecap="round"/>
+    <g transform="translate(112 112)">
+      <rect width="164" height="88" rx="14" fill="white"/>
+      <circle cx="49" cy="37" r="21" fill="#0873bd"/>
+      <path d="M18 76c7-25 54-25 61 0Z" fill="#0873bd"/>
+      <path d="M100 26h18v18h-18zM128 26h18v18h-18zM100 54h18v18h-18zM128 54h18v18h-18z" fill="none" stroke="#0873bd" stroke-width="6"/>
+    </g>
+    <path d="M117 217 174 274 355 93" fill="none" stroke="white" stroke-width="54" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M117 217 174 274 355 93" fill="none" stroke="url(#green)" stroke-width="34" stroke-linecap="round" stroke-linejoin="round"/>
+    <g fill="none" stroke="#1185bd" stroke-width="8" stroke-linecap="round">
+      <path d="M346 20h80"/>
+      <path d="M373 52h112"/>
+      <path d="M420 84h96"/>
+      <circle cx="346" cy="20" r="8" fill="#63b30d" stroke="none"/>
+      <circle cx="426" cy="20" r="10" fill="white"/>
+      <circle cx="373" cy="52" r="8" fill="#2f9a12" stroke="none"/>
+      <circle cx="485" cy="52" r="10" fill="white"/>
+      <circle cx="516" cy="84" r="10" fill="white"/>
+    </g>
+  </g>
+  <text x="360" y="290" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="72" font-weight="900" fill="#0667b4">SMART</text>
+  <text x="360" y="340" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="48" font-weight="900" fill="#48a510">ATTENDANCE</text>
+</svg>
