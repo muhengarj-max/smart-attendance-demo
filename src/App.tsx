@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { registerWithEmailPassword, sendFirebasePasswordReset, signInWithEmailPassword, signInWithGoogle } from "./firebase";
 import LandingPage from "./LandingPage";
@@ -17,6 +17,7 @@ import {
   Link as LinkIcon,
   Eye,
   EyeOff,
+  XCircle,
   RefreshCw
 } from "lucide-react";
 
@@ -152,11 +153,15 @@ type BestLocation = {
 };
 
 const getBestCurrentLocation = async ({
-  desiredAccuracy = 35,
-  timeoutMs = 14000,
+  desiredAccuracy = 80,
+  timeoutMs = 20000,
+  maxAcceptableAccuracy = 200,
+  minimumWaitMs = 3000,
 }: {
   desiredAccuracy?: number;
   timeoutMs?: number;
+  maxAcceptableAccuracy?: number;
+  minimumWaitMs?: number;
 } = {}): Promise<BestLocation> => {
   if (!("geolocation" in navigator)) {
     throw new Error("Location is not supported on this device/browser.");
@@ -166,24 +171,41 @@ const getBestCurrentLocation = async ({
     let best: GeolocationPosition | null = null;
     let settled = false;
     let watchId: number | null = null;
+    let lastError: GeolocationPositionError | null = null;
+    const startedAt = Date.now();
 
     const finish = (position?: GeolocationPosition | null) => {
       if (settled) return;
       settled = true;
+
       if (watchId !== null) {
         navigator.geolocation.clearWatch(watchId);
       }
 
       const finalPosition = position || best;
       if (!finalPosition) {
-        reject(new Error("Unable to get current location. Allow location access and try again."));
+        const message =
+          lastError?.code === 1
+            ? "Location permission was denied. Please allow location access."
+            : "Unable to get current location. Turn on GPS, enable precise location, and try again.";
+        reject(new Error(message));
+        return;
+      }
+
+      const accuracy = finalPosition.coords.accuracy || 999;
+      if (accuracy > maxAcceptableAccuracy) {
+        reject(
+          new Error(
+            `Location accuracy is too low (${Math.round(accuracy)}m). Move near a window or go outside and try again.`,
+          ),
+        );
         return;
       }
 
       resolve({
         latitude: finalPosition.coords.latitude,
         longitude: finalPosition.coords.longitude,
-        accuracy: finalPosition.coords.accuracy || 999,
+        accuracy,
       });
     };
 
@@ -192,33 +214,30 @@ const getBestCurrentLocation = async ({
         best = position;
       }
 
-      if (position.coords.accuracy <= desiredAccuracy) {
-        finish(position);
+      const waitedLongEnough = Date.now() - startedAt >= minimumWaitMs;
+      if (best && best.coords.accuracy <= desiredAccuracy && waitedLongEnough) {
+        finish(best);
       }
     };
 
     const onError = (error: GeolocationPositionError) => {
-      if (best) {
-        finish(best);
-        return;
-      }
+      lastError = error;
 
-      const message =
-        error.code === error.PERMISSION_DENIED
-          ? "Location permission was denied. Allow location access from browser settings."
-          : error.code === error.POSITION_UNAVAILABLE
-            ? "Location is unavailable. Turn on GPS/location services and try again."
-            : "Location timed out. Move near a window or open area and try again.";
-      reject(new Error(message));
+      if (error.code === 1 && !best) {
+        finish(null);
+      }
     };
 
-    watchId = navigator.geolocation.watchPosition(onPosition, onError, {
+    const options: PositionOptions = {
       enableHighAccuracy: true,
       maximumAge: 0,
       timeout: timeoutMs,
-    });
+    };
 
-    window.setTimeout(() => finish(best), timeoutMs);
+    watchId = navigator.geolocation.watchPosition(onPosition, onError, options);
+    navigator.geolocation.getCurrentPosition(onPosition, onError, options);
+
+    window.setTimeout(() => finish(best), timeoutMs + 1000);
   });
 };
 
@@ -235,12 +254,40 @@ const AdminLogin = ({
 }) => {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [isSignup, setIsSignup] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [loading, setLoading] = useState(false);
   const [googleLoading, setGoogleLoading] = useState(false);
   const [resetLoading, setResetLoading] = useState(false);
+  const passwordChecks = useMemo(() => ({
+    length: password.length >= 8,
+    lower: /[a-z]/.test(password),
+    upper: /[A-Z]/.test(password),
+    number: /\d/.test(password),
+    special: /[^A-Za-z0-9]/.test(password),
+  }), [password]);
+  const passedPasswordChecks = Object.values(passwordChecks).filter(Boolean).length;
+  const passwordStrength = useMemo(() => {
+    if (!password) {
+      return { label: "Enter a password", width: "0%", color: "bg-slate-300" };
+    }
+    if (passedPasswordChecks <= 1) {
+      return { label: "Weak password", width: "20%", color: "bg-red-500" };
+    }
+    if (passedPasswordChecks <= 3) {
+      return { label: "Fair password", width: "50%", color: "bg-yellow-400" };
+    }
+    if (passedPasswordChecks === 4) {
+      return { label: "Good password", width: "80%", color: "bg-blue-400" };
+    }
+    return { label: "Strong password", width: "100%", color: "bg-emerald-400" };
+  }, [password, passedPasswordChecks]);
+  const isSignupPasswordValid = Object.values(passwordChecks).every(Boolean);
+  const passwordsMatch = confirmPassword.length > 0 && password === confirmPassword;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -249,30 +296,44 @@ const AdminLogin = ({
     setSuccess("");
     try {
       const email = username.trim().toLowerCase();
-      const idToken = isSignup
-        ? await registerWithEmailPassword(email, password)
-        : await signInWithEmailPassword(email, password);
+      if (isSignup && !isSignupPasswordValid) {
+        setError("Password must contain:\n• 8 or more characters\n• Uppercase letter\n• Lowercase letter\n• Number\n• Special character");
+        return;
+      }
+      if (isSignup && password !== confirmPassword) {
+        setError("Passwords do not match.");
+        return;
+      }
+      if (isSignup) {
+        await registerWithEmailPassword(email, password);
+        setSuccess("Account created. Check your email and click the Firebase verification link, then sign in.");
+        setPassword("");
+        setConfirmPassword("");
+        setIsSignup(false);
+        return;
+      }
+
+      const idToken = await signInWithEmailPassword(email, password);
       const res = await fetch("/api/admin/firebase-auth", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ idToken, mode: isSignup ? "register" : "login" }),
+        body: JSON.stringify({ idToken, mode: "login" }),
       });
       const data = await res.json().catch(() => null);
       if (res.ok && data?.admin) {
         onLogin(data.admin);
-      } else if (res.ok && isSignup) {
-        setSuccess(data?.message || "Account created. You can sign in now.");
-        setUsername("");
-        setPassword("");
-        setIsSignup(false);
       } else {
-        setError(data?.error || (isSignup ? "Signup failed" : "Login failed"));
+        setError(data?.error || "Login failed");
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : "";
       setError(
         message.includes("auth/email-already-in-use")
           ? "This email already has an account. Sign in instead."
+          : message.includes("auth/email-not-verified")
+            ? "Your email is not verified yet. Check your inbox and click the Firebase verification link, then sign in again."
+          : message.includes("auth/password-does-not-meet-requirements") || message.includes("Missing password requirements")
+            ? "Password must contain:\n• 8 or more characters\n• Uppercase letter\n• Lowercase letter\n• Number\n• Special character"
           : message.includes("auth/invalid-credential")
             ? "Invalid email or password."
             : message.includes("auth/operation-not-allowed")
@@ -303,6 +364,7 @@ const AdminLogin = ({
         setSuccess(data?.message || "Google account registered. You can sign in now.");
         setUsername("");
         setPassword("");
+        setConfirmPassword("");
         setIsSignup(false);
       } else {
         setError(data?.error || (isSignup ? "Google registration failed" : "Google sign in failed"));
@@ -354,7 +416,7 @@ const AdminLogin = ({
       <motion.div 
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
-        className="bg-white/10 backdrop-blur-xl p-8 rounded-3xl shadow-2xl w-full max-w-md border border-white/20"
+        className="min-h-[640px] bg-white/10 backdrop-blur-xl p-8 rounded-3xl shadow-2xl w-full max-w-md border border-white/20"
       >
         <div className="text-center mb-8">
           <img
@@ -421,23 +483,109 @@ const AdminLogin = ({
             <div className="relative">
               <IdCard className="absolute left-3 top-1/2 -translate-y-1/2 text-blue-300 w-5 h-5" />
               <input
-                type="password"
+                type={showPassword ? "text" : "password"}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                className="w-full bg-white/5 border border-white/10 rounded-xl py-3 pl-10 pr-4 text-white placeholder-blue-300/30 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+                className="w-full bg-white/5 border border-white/10 rounded-xl py-3 pl-10 pr-24 text-white placeholder-blue-300/30 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
                 placeholder="Enter password"
                 required
               />
+              <button
+                type="button"
+                onClick={() => setShowPassword((current) => !current)}
+                className="absolute right-2 top-1/2 inline-flex -translate-y-1/2 items-center gap-1 rounded-lg border border-white/15 bg-white/10 px-2.5 py-1.5 text-xs font-bold text-blue-50 shadow-sm transition-colors hover:bg-white/20 hover:text-white"
+                aria-label={showPassword ? "Hide password" : "Show password"}
+              >
+                {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                <span>{showPassword ? "Hide" : "Show"}</span>
+              </button>
             </div>
+            {!isSignup && (
+              <div className="mt-2 flex justify-end">
+                <button
+                  type="button"
+                  onClick={handleForgotPassword}
+                  disabled={loading || googleLoading || resetLoading}
+                  className="text-xs font-bold text-blue-100 transition-colors hover:text-white hover:underline disabled:opacity-50"
+                >
+                  {resetLoading ? "Sending reset email..." : "Reset Password"}
+                </button>
+              </div>
+            )}
+            {isSignup && (
+              <div className="mt-3 space-y-3 rounded-xl border border-white/10 bg-white/5 p-3">
+                <div className="space-y-2">
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-white/10">
+                    <div
+                      className={`h-full rounded-full transition-all duration-300 ${passwordStrength.color}`}
+                      style={{ width: passwordStrength.width }}
+                    />
+                  </div>
+                  <p className="text-xs font-bold text-blue-100/80">{passwordStrength.label}</p>
+                </div>
+
+                <div className="grid gap-2 text-xs">
+                  {[
+                    { ok: passwordChecks.length, text: "8 or more characters" },
+                    { ok: passwordChecks.upper, text: "Uppercase letter" },
+                    { ok: passwordChecks.lower, text: "Lowercase letter" },
+                    { ok: passwordChecks.number, text: "Number" },
+                    { ok: passwordChecks.special, text: "Special character" },
+                  ].map((item) => (
+                    <div key={item.text} className="flex items-center gap-2">
+                      {item.ok ? (
+                        <CheckCircle2 className="h-4 w-4 text-emerald-300" />
+                      ) : (
+                        <XCircle className="h-4 w-4 text-red-300" />
+                      )}
+                      <span className={item.ok ? "font-semibold text-emerald-100" : "text-blue-100/65"}>
+                        {item.text}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
+
+          {isSignup && (
+            <div>
+              <label className="block text-sm font-medium text-blue-100 mb-2">Confirm Password</label>
+              <div className="relative">
+                <IdCard className="absolute left-3 top-1/2 -translate-y-1/2 text-blue-300 w-5 h-5" />
+                <input
+                  type={showConfirmPassword ? "text" : "password"}
+                  value={confirmPassword}
+                  onChange={(e) => setConfirmPassword(e.target.value)}
+                  className="w-full bg-white/5 border border-white/10 rounded-xl py-3 pl-10 pr-24 text-white placeholder-blue-300/30 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+                  placeholder="Confirm password"
+                  required
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowConfirmPassword((current) => !current)}
+                  className="absolute right-2 top-1/2 inline-flex -translate-y-1/2 items-center gap-1 rounded-lg border border-white/15 bg-white/10 px-2.5 py-1.5 text-xs font-bold text-blue-50 shadow-sm transition-colors hover:bg-white/20 hover:text-white"
+                  aria-label={showConfirmPassword ? "Hide confirm password" : "Show confirm password"}
+                >
+                  {showConfirmPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                  <span>{showConfirmPassword ? "Hide" : "Show"}</span>
+                </button>
+              </div>
+              {confirmPassword.length > 0 && (
+                <p className={`mt-2 text-xs font-bold ${passwordsMatch ? "text-emerald-200" : "text-red-200"}`}>
+                  {passwordsMatch ? "Passwords match" : "Passwords do not match"}
+                </p>
+              )}
+            </div>
+          )}
 
           {error && (
             <motion.div 
               initial={{ opacity: 0, x: -10 }}
               animate={{ opacity: 1, x: 0 }}
-              className="bg-red-500/20 border border-red-500/50 p-3 rounded-xl flex items-center gap-2 text-red-200 text-sm"
+              className="bg-red-500/20 border border-red-500/50 p-3 rounded-xl flex items-start gap-2 whitespace-pre-line text-red-200 text-sm"
             >
-              <AlertCircle className="w-4 h-4" />
+              <AlertCircle className="mt-0.5 w-4 h-4 shrink-0" />
               {error}
             </motion.div>
           )}
@@ -453,27 +601,14 @@ const AdminLogin = ({
             </motion.div>
           )}
 
-          {!isSignup && (
-            <div className="rounded-xl border border-white/10 bg-white/5 p-4">
-              <p className="text-sm font-semibold text-blue-100">Reset Password</p>
-              <p className="mt-1 text-xs leading-5 text-blue-100/60">
-                Enter your email above, then request a Firebase password reset email.
-              </p>
-              <button
-                type="button"
-                onClick={handleForgotPassword}
-                disabled={loading || googleLoading || resetLoading}
-                className="mt-3 w-full rounded-lg border border-blue-300/30 px-3 py-2 text-sm font-bold text-blue-50 transition-colors hover:bg-white/10 disabled:opacity-50"
-              >
-                {resetLoading ? "Sending reset email..." : "Send Reset Email"}
-              </button>
-            </div>
-          )}
-
           <button
             type="submit"
-            disabled={loading || googleLoading || resetLoading}
-            className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-4 rounded-xl shadow-lg shadow-blue-600/30 transition-all active:scale-95 flex items-center justify-center gap-2 disabled:opacity-50"
+            disabled={loading || googleLoading || resetLoading || (isSignup && (!isSignupPasswordValid || !passwordsMatch))}
+            className={`w-full text-white font-bold py-4 rounded-xl shadow-lg transition-all active:scale-95 flex items-center justify-center gap-2 disabled:cursor-not-allowed disabled:opacity-70 ${
+              isSignup && (!isSignupPasswordValid || !passwordsMatch)
+                ? "bg-slate-500 shadow-slate-900/20"
+                : "bg-blue-600 hover:bg-blue-500 shadow-blue-600/30"
+            }`}
           >
             {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : isSignup ? "Create Account" : "Sign In"}
           </button>
@@ -496,6 +631,7 @@ const AdminLogin = ({
             type="button"
             onClick={() => {
               setIsSignup((value) => !value);
+              setConfirmPassword("");
               setError("");
               setSuccess("");
             }}
@@ -530,6 +666,7 @@ const AdminDashboard = ({
   const [showCreate, setShowCreate] = useState(false);
   const [createdSessionId, setCreatedSessionId] = useState<string | null>(null);
   const [newSession, setNewSession] = useState({ name: "", lat: "", lng: "", radius: "50", minutes: "60" });
+  const [sessionLocationAccuracy, setSessionLocationAccuracy] = useState<number | null>(null);
   const [newAdmin, setNewAdmin] = useState({ username: "", password: "", role: "admin" as "admin" });
   const [passwordForm, setPasswordForm] = useState({
     oldPassword: "",
@@ -748,14 +885,16 @@ const AdminDashboard = ({
   const getCurrentLocation = async () => {
     setLocatingSession(true);
     try {
-      const location = await getBestCurrentLocation({ desiredAccuracy: 25, timeoutMs: 16000 });
+      const location = await getBestCurrentLocation();
       setNewSession(prev => ({
         ...prev,
-        lat: location.latitude.toFixed(7),
-        lng: location.longitude.toFixed(7),
+        lat: String(location.latitude),
+        lng: String(location.longitude),
       }));
+      setSessionLocationAccuracy(location.accuracy);
       window.showPrettyMessage?.(`Location set. Accuracy about ${Math.round(location.accuracy)}m.`, location.accuracy <= 50 ? "success" : "warning");
     } catch (error) {
+      setSessionLocationAccuracy(null);
       alert(error instanceof Error ? error.message : "Unable to get current location");
     } finally {
       setLocatingSession(false);
@@ -1477,6 +1616,16 @@ const AdminDashboard = ({
                   {locatingSession ? <Loader2 className="h-4 w-4 animate-spin" /> : <MapPin className="w-4 h-4" />}
                   {locatingSession ? "Getting accurate location..." : "Use Current Location"}
                 </button>
+                {sessionLocationAccuracy !== null && (
+                  <div className="rounded-xl border border-emerald-100 bg-emerald-50 px-3 py-2 text-xs font-semibold text-emerald-700">
+                    Location accuracy: about {Math.round(sessionLocationAccuracy)}m. Confirm the coordinates match your real class area before creating the session.
+                  </div>
+                )}
+                {locatingSession && (
+                  <p className="rounded-xl border border-blue-100 bg-blue-50 px-3 py-2 text-xs text-blue-700">
+                    Keep GPS on, enable Precise location, and stay outside or near a window until the accurate location is found.
+                  </p>
+                )}
                 <div>
                   <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Radius (meters)</label>
                   <input 
@@ -1801,7 +1950,7 @@ const AttendancePage = ({ sessionId }: { sessionId: string }) => {
   const handleSubmitWithImage = async (capturedImage: string) => {
     setStep("submitting");
     try {
-      const location = await getBestCurrentLocation({ desiredAccuracy: 30, timeoutMs: 18000 });
+      const location = await getBestCurrentLocation();
       const normalizedRegNumber = normalizeRegNumber(regNumber);
 
       if (isLocallyLocked(normalizedRegNumber, deviceFingerprintRef.current)) {
