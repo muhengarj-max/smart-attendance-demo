@@ -1091,34 +1091,44 @@ const AdminDashboard = ({
         )}
 
         {!hasActiveSubscription && (
-          <div className="mb-6 overflow-hidden rounded-lg border border-amber-200 bg-white shadow-sm">
-            <div className="border-b border-amber-100 bg-amber-50 px-5 py-4">
-              <p className="text-xs font-bold uppercase tracking-normal text-amber-700">
-                {canUseFreeTrial ? "Free Trial Available" : "Payment Required"}
-              </p>
-              <h2 className="mt-1 text-xl font-bold text-slate-900">
-                {canUseFreeTrial ? "Create up to 3 sessions free, then choose a package" : "You have reached the free trial limit"}
-              </h2>
-              <p className="mt-1 text-sm text-slate-600">
-                {canUseFreeTrial
-                  ? `You have used ${trialSessionsUsed} of ${trialSessionLimit} trial sessions. ${trialSessionsRemaining} remaining.`
-                  : `You have used all ${trialSessionLimit} trial sessions. Pay for a package to continue creating sessions.`}
-              </p>
-              <div className="mt-4 h-2 overflow-hidden rounded-full bg-amber-100">
-                <div
-                  className="h-full rounded-full bg-emerald-500 transition-all"
-                  style={{ width: `${Math.min(100, (trialSessionsUsed / trialSessionLimit) * 100)}%` }}
-                />
+          <div className="mb-6 overflow-hidden rounded-lg border border-slate-200 bg-white shadow-sm">
+            <div className="flex flex-col gap-4 border-b border-slate-100 bg-gradient-to-r from-white via-slate-50 to-cyan-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className={`rounded-full px-2.5 py-1 text-[11px] font-black uppercase tracking-normal ${
+                    canUseFreeTrial ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700"
+                  }`}>
+                    {canUseFreeTrial ? "Free Trial" : "Payment Required"}
+                  </span>
+                  <span className="text-xs font-semibold text-slate-500">
+                    {trialSessionsUsed}/{trialSessionLimit} sessions used
+                  </span>
+                </div>
+                <h2 className="mt-2 text-base font-black text-slate-900">
+                  {canUseFreeTrial ? `${trialSessionsRemaining} trial sessions remaining` : "Trial limit reached"}
+                </h2>
+                <p className="mt-1 text-xs text-slate-500">
+                  {canUseFreeTrial ? "Use your trial or choose a package below." : "Choose a package to continue creating sessions."}
+                </p>
               </div>
-              {canUseFreeTrial && (
-                <button
-                  type="button"
-                  onClick={() => setShowCreate(true)}
-                  className="mt-4 rounded-lg bg-emerald-600 px-4 py-2 text-sm font-bold text-white transition-colors hover:bg-emerald-700"
-                >
-                  Start Free Trial Session ({trialSessionsRemaining} left)
-                </button>
-              )}
+
+              <div className="flex items-center gap-3 sm:min-w-[260px]">
+                <div className="h-2 flex-1 overflow-hidden rounded-full bg-slate-200">
+                  <div
+                    className="h-full rounded-full bg-emerald-500 transition-all"
+                    style={{ width: `${Math.min(100, (trialSessionsUsed / trialSessionLimit) * 100)}%` }}
+                  />
+                </div>
+                {canUseFreeTrial && (
+                  <button
+                    type="button"
+                    onClick={() => setShowCreate(true)}
+                    className="rounded-lg bg-slate-900 px-3 py-2 text-xs font-bold text-white transition-colors hover:bg-slate-800"
+                  >
+                    Start Trial
+                  </button>
+                )}
+              </div>
             </div>
             <PricingSection currentAdmin={currentAdmin} onPaymentStarted={() => fetch("/api/admin/me", { credentials: "include" }).then((res) => res.ok ? res.json() : null).then(() => undefined)} />
           </div>

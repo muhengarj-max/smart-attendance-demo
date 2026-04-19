@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { CheckCircle2 } from "lucide-react";
 import { getSnippePaymentStatus, startSnippeMobilePayment } from "./snippePayments";
 
 type PricingPlan = {
@@ -170,17 +171,17 @@ export default function PricingSection({
   }, [paymentReference]);
 
   return (
-    <section className="bg-[#0f172a] px-6 py-12 text-white">
+    <section className="bg-[#0f172a] px-4 py-8 text-white sm:px-6">
       <div className="mx-auto max-w-6xl">
-        <div className="mb-10 text-center">
-          <p className="text-sm font-bold uppercase tracking-normal text-cyan-300">Mobile Money Payment</p>
-          <h2 className="mt-3 text-4xl font-bold md:text-5xl">Smart Attendance Pricing</h2>
-          <p className="mx-auto mt-4 max-w-2xl text-base text-slate-300 md:text-lg">
+        <div className="mb-7 text-center">
+          <p className="text-xs font-bold uppercase tracking-normal text-cyan-300">Mobile Money Payment</p>
+          <h2 className="mt-2 text-3xl font-bold md:text-4xl">Smart Attendance Pricing</h2>
+          <p className="mx-auto mt-3 max-w-2xl text-sm text-slate-300 md:text-base">
             Choose the package that fits your school, lecturer, or institution.
           </p>
         </div>
 
-        <div className="mb-8 grid gap-4 rounded-lg border border-white/10 bg-white/8 p-5 md:grid-cols-3">
+        <div className="mb-6 grid gap-4 rounded-lg border border-white/10 bg-white/8 p-4 md:grid-cols-3">
           <label className="block">
             <span className="text-sm font-bold text-slate-100">Mobile money number</span>
             <input
@@ -229,7 +230,7 @@ export default function PricingSection({
           </div>
         )}
 
-        <div className="grid gap-6 md:grid-cols-3">
+        <div className="grid gap-5 md:grid-cols-3">
           {plans.map((plan) => {
             const isSelected = selectedPlan.id === plan.id;
             const isLoading = loadingPlanId === plan.id;
@@ -237,7 +238,7 @@ export default function PricingSection({
             return (
               <div
                 key={plan.id}
-                className={`relative rounded-lg border p-8 shadow-2xl transition duration-300 hover:-translate-y-1 ${
+                className={`relative rounded-lg border p-6 shadow-2xl transition duration-300 hover:-translate-y-1 ${
                   plan.popular
                     ? "border-cyan-300 bg-cyan-950/40"
                     : isSelected
@@ -251,15 +252,15 @@ export default function PricingSection({
                   </span>
                 )}
 
-                <h3 className="text-2xl font-bold">{plan.name}</h3>
-                <p className="mt-3 text-3xl font-extrabold text-cyan-300">{plan.price}</p>
+                <h3 className="text-xl font-bold">{plan.name}</h3>
+                <p className="mt-3 text-2xl font-extrabold text-cyan-300">{plan.price}</p>
                 <p className="mt-1 text-sm text-slate-300">{plan.duration}</p>
                 <p className="mt-4 text-sm leading-6 text-slate-300">{plan.description}</p>
 
                 <ul className="mt-6 space-y-3">
                   {plan.features.map((feature) => (
                     <li key={feature} className="flex items-start gap-3 text-sm text-slate-200">
-                      <span className="mt-0.5 text-emerald-300">OK</span>
+                      <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-300" />
                       <span>{feature}</span>
                     </li>
                   ))}

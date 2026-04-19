@@ -60,9 +60,13 @@ declare global {
   }
 }
 
-const getRequiredEnv = (name: string) => {
+const getRequiredEnv = (name: string, localDevFallback?: string) => {
   const value = process.env[name]?.trim();
   if (!value) {
+    if (!IS_PRODUCTION && !IS_RENDER && localDevFallback) {
+      console.warn(`Using local development fallback for ${name}. Set ${name} in .env before deploying.`);
+      return localDevFallback;
+    }
     throw new Error(`Missing required environment variable: ${name}`);
   }
   return value;
@@ -70,9 +74,9 @@ const getRequiredEnv = (name: string) => {
 
 const isRemoteUrl = (value?: string | null) => /^https?:\/\//i.test(String(value || ""));
 
-const JWT_SECRET = getRequiredEnv("JWT_SECRET");
-const SUPER_ADMIN_USERNAME = getRequiredEnv("SUPER_ADMIN_USERNAME");
-const SUPER_ADMIN_PASSWORD = getRequiredEnv("SUPER_ADMIN_PASSWORD");
+const JWT_SECRET = getRequiredEnv("JWT_SECRET", "local-dev-jwt-secret-change-me");
+const SUPER_ADMIN_USERNAME = getRequiredEnv("SUPER_ADMIN_USERNAME", "superadmin");
+const SUPER_ADMIN_PASSWORD = getRequiredEnv("SUPER_ADMIN_PASSWORD", "Admin@12345!");
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME?.trim();
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
 const FIREBASE_SERVICE_ACCOUNT_JSON = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
